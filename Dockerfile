@@ -59,15 +59,16 @@ RUN npm prune --omit=dev --no-audit --no-fund \
 
 FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime
 ENV NODE_ENV=production
-# uid and gid are both 10001, so the --chown=10001:10001 copies below never leave files under an orphan group.
+# The service runs as 10001 (uid and gid); the app tree is root's and read-only to it, but for the directories the render
+# option WritableDirs names.
 RUN groupadd --system --gid 10001 pragmatic && useradd --system --create-home --uid 10001 --gid 10001 pragmatic
 WORKDIR /workspace/pragmatic-tenant-admin
 
 FROM runtime AS pragmatic-tenant-admin
-COPY --from=build --chown=10001:10001 /workspace/pragmatic-tenant-admin/package.json /workspace/pragmatic-tenant-admin/package.json
-COPY --from=build --chown=10001:10001 /workspace/pragmatic-tenant-admin/node_modules /workspace/pragmatic-tenant-admin/node_modules
-COPY --from=build --chown=10001:10001 /workspace/pragmatic-tenant-admin/dist /workspace/pragmatic-tenant-admin/dist
-COPY --from=build --chown=10001:10001 /workspace/pragmatic-tenant-admin/tenant-portal/dist /workspace/pragmatic-tenant-admin/tenant-portal/dist
+COPY --from=build /workspace/pragmatic-tenant-admin/package.json /workspace/pragmatic-tenant-admin/package.json
+COPY --from=build /workspace/pragmatic-tenant-admin/node_modules /workspace/pragmatic-tenant-admin/node_modules
+COPY --from=build /workspace/pragmatic-tenant-admin/dist /workspace/pragmatic-tenant-admin/dist
+COPY --from=build /workspace/pragmatic-tenant-admin/tenant-portal/dist /workspace/pragmatic-tenant-admin/tenant-portal/dist
 ARG COMPONENT_DIGEST
 COPY --from=component /component/component.json /pragmatic/component.json
 LABEL ai.pragmatic-tech.component.digest=$COMPONENT_DIGEST
