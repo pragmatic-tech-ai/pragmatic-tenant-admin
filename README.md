@@ -6,7 +6,9 @@ Postgres database, and orchestrates its own hive's environments through the Kube
 account. Its sign-in goes to the tenant's realm sign-in service (pragmatic-tenant-idp), which the platform provisioned.
 
 Split out of pragmatic-server (seed commit `chore: seed from pragmatic-server@2a2e8138`); image name, port, environment
-variables, wire paths and component descriptor are unchanged. Most of the console's tenant plane (tenant API and sign-in,
+variables, wire paths and component descriptor are unchanged. The compiled entry moved from
+`dist-tenant-admin/admin/control-plane/bin/` to `dist/bin/` (the image's `ENTRYPOINT`); a Kubernetes manifest that
+still sets the old path as the container command fails to start this image. Most of the console's tenant plane (tenant API and sign-in,
 environments, configuration, records, the environment seed and its data) lives in the transitional shared package
 `@pragmatic-tech-ai/pragmatic-tenant-plane`, which it shares with the platform admin console's co-hosted tenant plane;
 C5.3 folds that package back into this repository.

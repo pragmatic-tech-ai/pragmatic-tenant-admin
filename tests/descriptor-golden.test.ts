@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
-import { ReleaseApp } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
+import { ComponentDescriptorSet, ReleaseApp } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import { Components } from '../src/release-components.js'
 import { TenantAdminComponent } from '../src/tenant-admin-component.js'
 
@@ -13,7 +13,8 @@ class DescriptorGolden
     /** pragmatic-server admin/control-plane/tests/tenant-admin-component.test.ts and descriptors/digests.json. */
     public static readonly Digest = 'sha256:98bddb2de6fe2fe034b21e75550028708eac6e4d98b63fcd10d633e47c699577'
     private static readonly Root = join(dirname(fileURLToPath(import.meta.url)), '..')
-    public static readonly VendoredDigests = join(DescriptorGolden.Root, 'src', 'descriptors', 'digests.json')
+    public static readonly VendoredDirectory = join(DescriptorGolden.Root, 'src', 'descriptors')
+    public static readonly VendoredDigests = join(DescriptorGolden.VendoredDirectory, 'digests.json')
     public static readonly PackageJson = join(DescriptorGolden.Root, 'package.json')
     public static readonly Utf8 = 'utf8'
 
@@ -41,6 +42,12 @@ describe('descriptor golden', () =>
     it('the vendored descriptor set pins the same digest for this console', () =>
     {
         assert.equal(DescriptorGolden.Json(DescriptorGolden.VendoredDigests)[ReleaseApp.TenantAdmin], DescriptorGolden.Digest)
+    })
+
+    it('the vendored descriptor file of this console has exactly that digest', () =>
+    {
+        const vendored = ComponentDescriptorSet.FromDirectory(DescriptorGolden.VendoredDirectory).Get(ReleaseApp.TenantAdmin)
+        assert.equal(vendored?.ContentDigest(), DescriptorGolden.Digest)
     })
 
     it('the descriptor version is the package version', () =>

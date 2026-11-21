@@ -83,6 +83,9 @@ class Forbidden
     public static readonly PlaneSeenMessage = 'the probe followed pragmatic-tenant-plane'
     public static readonly PlaneMarker = 'pragmatic-tenant-plane'
     private static readonly Separator = ': '
+    /** The source of a regular expression matching `class <name>` as whole words. */
+    private static readonly ClassPatternPrefix = '\\bclass '
+    private static readonly ClassPatternSuffix = '\\b'
     public static readonly Classes: readonly string[] = [
         'DockerEnv',
         'ChildProcessSpawn',
@@ -105,7 +108,7 @@ class Forbidden
         return inputs.flatMap(input =>
         {
             const text = ClosureProbe.TextOf(input)
-            return F.Classes.filter(name => new RegExp(`\\bclass ${name}\\b`).test(text)).map(name => input + F.Separator + name)
+            return F.Classes.filter(name => new RegExp(F.ClassPatternPrefix + name + F.ClassPatternSuffix).test(text)).map(name => input + F.Separator + name)
         })
     }
 }

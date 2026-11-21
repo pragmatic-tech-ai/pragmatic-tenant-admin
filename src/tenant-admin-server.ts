@@ -262,7 +262,7 @@ export class TenantAdminServer
         }
     }
 
-    /** The tenant portal bundle folder: PRAGMATIC_TENANT_ADMIN_PORTAL_DIR (resolved) when set, else the shipped `admin/tenant-portal/dist`. */
+    /** The tenant portal bundle folder: PRAGMATIC_TENANT_ADMIN_PORTAL_DIR (resolved) when set, else the shipped `tenant-portal/dist` (beside `src` / `dist`). */
     public static PortalRootOf(env: NodeJS.ProcessEnv): string
     {
         const raw = env[TenantAdminEnv.PortalDir]?.trim() ?? TenantAdminServer.EmptyString

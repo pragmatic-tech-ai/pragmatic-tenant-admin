@@ -13,11 +13,11 @@ export class TenantAdminImportArguments
 
 /**
  * The import of an in-hive tenant admin console's pre-A5 JSON data root into its Postgres database, run inside the
- * tenant-admin image: `node dist-tenant-admin/admin/control-plane/bin/pragmatic-tenant-admin-import.js --data-root /data
- * [--force]`. The console also imports by itself at start when its database holds none of its records; this command is
- * for dev data and a forced re-run. The database is the console's own (PRAGMATIC_TENANT_ADMIN_DATABASE_URL_FILE). The
- * data root is only read. Prints what it wrote as JSON; exits 2 on a usage error, 3 when the database already holds
- * records (pass --force to import over it), 1 on any other failure (its message never carries a secret).
+ * tenant-admin image: `node dist/bin/pragmatic-tenant-admin-import.js --data-root /data [--force]`. The console also
+ * imports by itself at start when its database holds none of its records; this command is for dev data and a forced
+ * re-run. The database is the console's own (PRAGMATIC_TENANT_ADMIN_DATABASE_URL_FILE). The data root is only read.
+ * Prints what it wrote as JSON; exits 2 on a usage error, 3 when the database already holds records (pass --force to
+ * import over it), 1 on any other failure (its message never carries a secret).
  */
 export class TenantAdminImportBin
 {

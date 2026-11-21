@@ -30,8 +30,8 @@ export class ConsoleComponents implements IComponentDescriptorSource
     private static readonly VendoredFolder = 'descriptors'
     private static readonly ParentSegment = '..'
 
-    /** The set vendored with the console (`admin/control-plane/descriptors`; the image stages it at the same place in
-     *  the compiled tree). */
+    /** The set vendored with the console (`src/descriptors`; the image stages it at the same place in the compiled tree,
+     *  `dist/descriptors`). */
     public static VendoredDirectory(): string
     {
         const C = ConsoleComponents

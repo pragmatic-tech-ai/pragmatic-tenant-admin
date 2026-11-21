@@ -26,7 +26,16 @@ The console's composition and its in-hive seams live here; the tenant plane it c
 | `tenant-portal/` | The tenant portal SPA (Mural, `pragmatic-app-shell`), built to `tenant-portal/dist`, the console's static root. |
 | `closure.json` | What the image copies; `pragmatic-closure-check` keeps it, the Dockerfile and the code in step. |
 
-Tests: `src/tests` (composition, import, the injected IdP, environment reach, the seeded directory, the tenant API
-routes the console mounts, configuration, the descriptor golden and its readers), `tests/` (the release module's
-descriptor equals the pragmatic-server golden digest, one installed copy of TODL, todl-runtime and Mural, and the entry's
-closure carries none of the dev-box drivers), `tenant-portal/src/**/tests` (the portal's view models and services).
+Tests:
+
+- `src/tests` (`npm test`): composition, import, the injected IdP, environment reach, the seeded directory, the tenant
+  API routes the console mounts, configuration, the descriptor golden and its readers. Its support files are copies made
+  at the split (`component-golden.ts`, `component-sources.ts` from pragmatic-server's component tests;
+  `res-recorder.ts`, `tenant-test-sessions.ts`, also copied into pragmatic-tenant-plane's tests).
+- `tests/*.test.ts` (`npm test`): the release module's descriptor and the vendored file equal the pragmatic-server
+  golden digest, one installed copy of TODL, todl-runtime and Mural, and the entry's closure carries none of the dev-box
+  drivers.
+- `tests/image.test.sh <image>` (CI, after the bake): the runtime files are in the image and the entry stops on missing
+  configuration, never on a missing module.
+- `tenant-portal/src/**/tests` (`npm test` in `tenant-portal`): the portal's view models and services;
+  `tenant-portal/tests` holds the Playwright spec (`npm run test:e2e`, against `fake-tenant-control-plane.ts`).

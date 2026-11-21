@@ -67,7 +67,8 @@ describe('singletons', () =>
     {
         it(`one installed copy of ${name}`, () =>
         {
-            assert.equal(InstalledPackages.CopiesOf(name).length, 1, JSON.stringify(InstalledPackages.CopiesOf(name)))
+            const copies = InstalledPackages.CopiesOf(name)
+            assert.equal(copies.length, 1, JSON.stringify(copies))
         })
     }
 })
