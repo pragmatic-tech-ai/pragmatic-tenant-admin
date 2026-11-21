@@ -1,0 +1,12 @@
+{
+  "pragmatic-tenant-admin": {
+    "entrypoint": ["node", "dist/bin/pragmatic-tenant-admind.js"],
+    "packages": [],
+    "files": [
+      "pragmatic-tenant-admin/package.json",
+      "pragmatic-tenant-admin/node_modules",
+      "pragmatic-tenant-admin/dist",
+      "pragmatic-tenant-admin/tenant-portal/dist"
+    ]
+  }
+}

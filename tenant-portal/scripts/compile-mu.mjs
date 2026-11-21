@@ -3,8 +3,8 @@
 // resolved app-locally (mural's package "exports" do not expose its
 // package.json), and compilation is per-file and order-independent, so one
 // glob over src/ is enough. The generated .mu.js files are committed.
-// The CLI path is realpath'd: mural is a file: dependency (a symlink), and the
-// CLI only runs when its own resolved URL equals process.argv[1].
+// The CLI path is realpath'd (mural may be a linked install), and the CLI only
+// runs when its own resolved URL equals process.argv[1].
 import { execFileSync } from 'node:child_process'
 import { existsSync, globSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'

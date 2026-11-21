@@ -58,8 +58,8 @@ class ThemeFontCopy
 
     // mural's `exports` map does not expose package.json, so require.resolve
     // of the package cannot be used; ask Node's own module lookup for the
-    // node_modules search paths instead and take the first that holds mural,
-    // following the file: dependency's symlink.
+    // node_modules search paths instead and take the first that holds mural
+    // (realpath'd, in case it is a linked install).
     private static PackageDirectory(): string
     {
         const lookup = createRequire(fileURLToPath(import.meta.url)).resolve.paths(ThemeFontCopy.PackageName) ?? []
@@ -95,8 +95,8 @@ class ThemeFontCopy
     }
 }
 
-// Plain browser build of the tenant admin portal. Mural is consumed as its built
-// sibling dist (file: dependency); the 'development' export condition (which
+// Plain browser build of the tenant admin portal. Mural is consumed as its
+// published dist (registry package); the 'development' export condition (which
 // points at uncompiled src) is deliberately NOT enabled. dedupe forces one
 // physical copy of mural's module-level singletons (ThemeManager, Application).
 export default defineConfig({
