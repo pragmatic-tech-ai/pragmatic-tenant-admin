@@ -18,9 +18,8 @@ jobs:
       ui-dirs: 'tenant-portal'
       node: true
       closure-check: true
-      # Set by hand (the template profile still renders false): tests/image.test.sh checks the runtime files and that the
-      # entry stops on missing configuration, never on a missing module.
       image-test: true
+      start-smoke: true
       arm64: false
       helm-chart: ''
     secrets:
