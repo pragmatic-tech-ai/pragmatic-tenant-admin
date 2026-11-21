@@ -1,0 +1,575 @@
+import { afterEach, describe, it, mock } from 'node:test'
+import assert from 'node:assert/strict'
+import { TenantApiClient, ApiError } from '../tenant-api-client.js'
+import { EnvStatus, EnvType, Template, TenantEventType } from '../tenant-types.js'
+import type { IWebSocketFactory, IWebSocketLike, TenantEvent } from '../tenant-types.js'
+
+type Recorded = { route: string; init: RequestInit | undefined }
+
+class FetchStub
+{
+    public static readonly Original = globalThis.fetch
+    public static Calls: Recorded[] = []
+
+    public static Install(payload: unknown, status = 200): void
+    {
+        FetchStub.Calls = []
+        globalThis.fetch = (async (route: string, init?: RequestInit) =>
+        {
+            FetchStub.Calls.push({ route, init })
+            return { ok: status >= 200 && status < 300, status, json: async () => payload } as Response
+        }) as typeof fetch
+    }
+
+    public static Restore(): void
+    {
+        globalThis.fetch = FetchStub.Original
+    }
+}
+
+class FakeWebSocket implements IWebSocketLike
+{
+    public Closed = false
+    private message: ((data: string) => void) | undefined
+    private close: (() => void) | undefined
+
+    public OnMessage(cb: (data: string) => void): void
+    {
+        this.message = cb
+    }
+
+    public OnClose(cb: () => void): void
+    {
+        this.close = cb
+    }
+
+    public Close(): void
+    {
+        this.Closed = true
+    }
+
+    public Push(data: string): void
+    {
+        this.message?.(data)
+    }
+
+    public FireClose(): void
+    {
+        this.close?.()
+    }
+}
+
+class FakeWebSocketFactory implements IWebSocketFactory
+{
+    public readonly Location = { protocol: 'http:', host: 'host' }
+    public readonly Urls: string[] = []
+    public readonly Tickets: string[] = []
+    public readonly Sockets: FakeWebSocket[] = []
+
+    public Open(url: string, ticket: string): IWebSocketLike
+    {
+        const socket = new FakeWebSocket()
+        this.Urls.push(url)
+        this.Tickets.push(ticket)
+        this.Sockets.push(socket)
+        return socket
+    }
+}
+
+// Lets the ticket request and the socket open behind it run.
+class Ticks
+{
+    public static async Settle(): Promise<void>
+    {
+        for (let i = 0; i < 5; i++)
+        {
+            await new Promise(resolve => setImmediate(resolve))
+        }
+    }
+}
+
+// The client over fake sockets (no browser in node).
+class TestClient extends TenantApiClient
+{
+}
+
+describe('TenantApiClient fetch', () =>
+{
+    afterEach(() => { FetchStub.Restore() })
+
+    it('Session reads the app-host session (subject and claims) from the tenant auth route', async () =>
+    {
+        FetchStub.Install({ subject: 'sub-1', claims: { tenant: ['acme'], email: ['a@b'], roles: ['admin'], app_roles: [] } })
+        const session = await new TestClient(new FakeWebSocketFactory()).Session()
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-auth/session')
+        assert.equal(session?.Subject, 'sub-1')
+        assert.equal(session?.Email, 'a@b')
+        assert.equal(session?.Claim('tenant'), 'acme')
+        assert.deepEqual(session?.Roles, ['admin'])
+    })
+
+    it('Profile GETs the profile route and returns the DTO', async () =>
+    {
+        const dto = {
+            principalId: 'p',
+            email: 'a@b',
+            roleLabel: 'Tenant owner',
+            tenant: { id: 't', displayName: 'T', organisation: 'Org' },
+            hive: { id: 'h', displayName: 'H' },
+            capabilities: { envs: true, adopt: true, access: true, settings: true },
+            ownerContact: 'o@b'
+        }
+        FetchStub.Install(dto)
+        assert.deepEqual(await new TestClient(new FakeWebSocketFactory()).Profile(), dto)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/profile')
+    })
+
+    it('Session returns null on 401', async () =>
+    {
+        FetchStub.Install({ error: 'no' }, 401)
+        assert.equal(await new TestClient(new FakeWebSocketFactory()).Session(), null)
+    })
+
+    it('Logout POSTs to the logout route', async () =>
+    {
+        FetchStub.Install({})
+        await new TestClient(new FakeWebSocketFactory()).Logout()
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-auth/logout')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'POST')
+    })
+
+    it('ListHives, ListEnvironments and ListManifests hit their routes', async () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        FetchStub.Install([{ id: 'h' }])
+        assert.deepEqual(await c.ListHives(), [{ id: 'h' }])
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/hives')
+        FetchStub.Install([])
+        await c.ListEnvironments()
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments')
+        FetchStub.Install([{ id: 'm' }])
+        assert.deepEqual(await c.ListManifests(), [{ id: 'm' }])
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/manifests')
+    })
+
+    it('CreateEnvironment POSTs name, template and type and returns the DTO', async () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        const dto = { name: 'gamma', template: Template.DemoContoso, type: EnvType.Development, status: EnvStatus.Running }
+        FetchStub.Install(dto, 201)
+        const created = await c.CreateEnvironment({ name: 'gamma', template: Template.DemoContoso, type: EnvType.Development })
+        assert.deepEqual(created, dto)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'POST')
+        assert.deepEqual(JSON.parse(String(FetchStub.Calls[0]!.init?.body)), { name: 'gamma', template: 'demo-contoso', type: 'development' })
+    })
+
+    it('CreateEnvironment throws ApiError 409 on a duplicate name', async () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        FetchStub.Install({ error: 'An environment with that name already exists' }, 409)
+        await assert.rejects(
+            () => c.CreateEnvironment({ name: 'alpha-env', template: Template.DevBlank, type: EnvType.Runtime }),
+            (e: unknown) => e instanceof ApiError && e.Status === 409)
+    })
+
+    it('GetRollout and GetHealth hit the hive sub-routes', async () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        const rollout = { targetVersion: 'v1', environments: [] }
+        FetchStub.Install(rollout)
+        assert.deepEqual(await c.GetRollout('h 1'), rollout)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/hives/h%201/rollout')
+        FetchStub.Install([{ environmentName: 'e', ready: true }])
+        assert.equal((await c.GetHealth('h1')).length, 1)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/hives/h1/health')
+    })
+
+    it('SelectTarget POSTs the version body', async () =>
+    {
+        FetchStub.Install({})
+        await new TestClient(new FakeWebSocketFactory()).SelectTarget('h1', 'v2')
+        const call = FetchStub.Calls[0]!
+        assert.equal(call.route, '/tenant-api/hives/h1/target')
+        assert.equal(call.init?.method, 'POST')
+        assert.deepEqual(JSON.parse(call.init?.body as string), { version: 'v2' })
+    })
+
+    it('GetEmailDomains GETs the settings route; SetEmailDomains PUTs the domains body', async () =>
+    {
+        FetchStub.Install({ domains: ['acme.test'], editable: true })
+        const client = new TestClient(new FakeWebSocketFactory())
+        assert.deepEqual(await client.GetEmailDomains(), { domains: ['acme.test'], editable: true })
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/settings/email-domains')
+        await client.SetEmailDomains(['acme.test', 'beta.test'])
+        const call = FetchStub.Calls[1]!
+        assert.equal(call.route, '/tenant-api/settings/email-domains')
+        assert.equal(call.init?.method, 'PUT')
+        assert.deepEqual(JSON.parse(call.init?.body as string), { domains: ['acme.test', 'beta.test'] })
+    })
+
+    it('VerifyEmailDomain posts { domain } to /tenant-api/settings/email-domains/verify', async () =>
+    {
+        FetchStub.Install({ domains: ['acme.test'], editable: true, inHive: false, pending: [], verifications: [] })
+        const view = await new TestClient(new FakeWebSocketFactory()).VerifyEmailDomain('acme.test')
+        assert.deepEqual(view.verifications, [])
+        const call = FetchStub.Calls[0]!
+        assert.equal(call.route, '/tenant-api/settings/email-domains/verify')
+        assert.equal(call.init?.method, 'POST')
+        assert.deepEqual(JSON.parse(call.init?.body as string), { domain: 'acme.test' })
+    })
+
+    it('SelectTarget maps a 409 to ApiError', async () =>
+    {
+        FetchStub.Install({ error: 'conflict' }, 409)
+        await assert.rejects(new TestClient(new FakeWebSocketFactory()).SelectTarget('h1', 'v2'), (e: unknown) =>
+            e instanceof ApiError && e.Status === 409 && e.message === 'conflict')
+    })
+
+    it('StartEnvironment POSTs to the start route and returns the DTO', async () =>
+    {
+        const env = { name: 'e1', status: 'running' }
+        FetchStub.Install(env)
+        const c = new TestClient(new FakeWebSocketFactory())
+        assert.deepEqual(await c.StartEnvironment('e1'), env)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e1/start')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'POST')
+        await c.StopEnvironment('e1')
+        assert.equal(FetchStub.Calls[1]!.route, '/tenant-api/environments/e1/stop')
+        await c.RestartEnvironment('e1')
+        assert.equal(FetchStub.Calls[2]!.route, '/tenant-api/environments/e1/restart')
+    })
+})
+
+describe('TenantApiClient admin (users and access)', () =>
+{
+    afterEach(() => { FetchStub.Restore() })
+
+    it('GetAdminSnapshot GETs the snapshot route and returns accounts + grants', async () =>
+    {
+        const snap = { accounts: [{ principalId: 'p1', email: 'a@b', disabled: false }], grants: [{ subject: 'p1', role: 'Admin', resourceKind: 'Realm', resourcePath: [] }] }
+        FetchStub.Install(snap)
+        assert.deepEqual(await new TestClient(new FakeWebSocketFactory()).GetAdminSnapshot('envA'), snap)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/envA/admin/snapshot')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'GET')
+    })
+
+    it('CreateAccount POSTs the body and resolves on 201', async () =>
+    {
+        FetchStub.Install({ ok: true }, 201)
+        const params = { email: 'a@b', principalId: 'p1', password: 'pw' }
+        await new TestClient(new FakeWebSocketFactory()).CreateAccount('envA', params)
+        const call = FetchStub.Calls[0]!
+        assert.equal(call.route, '/tenant-api/environments/envA/admin/accounts')
+        assert.equal(call.init?.method, 'POST')
+        assert.deepEqual(JSON.parse(call.init?.body as string), params)
+        assert.deepEqual(call.init?.headers, { accept: 'application/json', 'content-type': 'application/json' })
+    })
+
+    it('DisableAccount DELETEs the account route', async () =>
+    {
+        FetchStub.Install({ ok: true })
+        await new TestClient(new FakeWebSocketFactory()).DisableAccount('envA', 'p1')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/envA/admin/accounts/p1')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'DELETE')
+    })
+
+    it('DeleteEnvironment DELETEs the environment route', async () =>
+    {
+        FetchStub.Install({ ok: true })
+        await new TestClient(new FakeWebSocketFactory()).DeleteEnvironment('e1')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e1')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'DELETE')
+    })
+
+    it('GrantRole POSTs and RevokeRole DELETEs the grants route with the body', async () =>
+    {
+        const grant = { subject: 'p1', role: 'Admin' }
+        const c = new TestClient(new FakeWebSocketFactory())
+        FetchStub.Install({ ok: true })
+        await c.GrantRole('envA', grant)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/envA/admin/grants')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'POST')
+        assert.deepEqual(JSON.parse(FetchStub.Calls[0]!.init?.body as string), grant)
+        FetchStub.Install({ ok: true })
+        await c.RevokeRole('envA', grant)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/envA/admin/grants')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'DELETE')
+        assert.deepEqual(JSON.parse(FetchStub.Calls[0]!.init?.body as string), grant)
+    })
+
+    it('DisableAccount maps a 409 to ApiError with the backend message', async () =>
+    {
+        FetchStub.Install({ error: 'cannot disable last owner' }, 409)
+        await assert.rejects(new TestClient(new FakeWebSocketFactory()).DisableAccount('envA', 'p1'), (e: unknown) =>
+            e instanceof ApiError && e.Status === 409 && e.message === 'cannot disable last owner')
+    })
+
+    it('ListTokens GETs the tokens route and returns the summaries', async () =>
+    {
+        const rows = [{ tokenRef: 'r1', principalId: 'svc', scopes: ['a'], expiresAt: null, revoked: false }]
+        FetchStub.Install(rows)
+        const got = await new TestClient(new FakeWebSocketFactory()).ListTokens('e')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e/admin/tokens')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'GET')
+        assert.deepEqual(got, rows)
+    })
+
+    it('IssueToken POSTs the params and returns the issued DTO', async () =>
+    {
+        const params = { principalId: 'svc', scopes: ['a', 'b'], expiresInSeconds: 60 }
+        const issued = { tokenRef: 'r2', token: 'secret', principalId: 'svc', scopes: ['a', 'b'], expiresAt: null }
+        FetchStub.Install(issued, 201)
+        const got = await new TestClient(new FakeWebSocketFactory()).IssueToken('e', params)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e/admin/tokens')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'POST')
+        assert.deepEqual(JSON.parse(FetchStub.Calls[0]!.init?.body as string), params)
+        assert.deepEqual(got, issued)
+    })
+
+    it('RevokeToken DELETEs the tokens route with the tokenRef body', async () =>
+    {
+        FetchStub.Install({ ok: true })
+        await new TestClient(new FakeWebSocketFactory()).RevokeToken('e', 'r')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e/admin/tokens')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'DELETE')
+        assert.deepEqual(JSON.parse(FetchStub.Calls[0]!.init?.body as string), { tokenRef: 'r' })
+    })
+
+    it('RevokeToken maps a 409 to ApiError', async () =>
+    {
+        FetchStub.Install({ error: 'already revoked' }, 409)
+        await assert.rejects(new TestClient(new FakeWebSocketFactory()).RevokeToken('e', 'r'), (e: unknown) =>
+            e instanceof ApiError && e.Status === 409 && e.message === 'already revoked')
+    })
+
+    it('GetSecurityModel GETs the security-model route and returns the body', async () =>
+    {
+        const model = { businessUnits: [], users: [], teams: [], roleAssignments: [], profileAssignments: [], roleOverrides: [], profileOverrides: [] }
+        FetchStub.Install(model)
+        const got = await new TestClient(new FakeWebSocketFactory()).GetSecurityModel('e')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e/admin/security-model')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'GET')
+        assert.deepEqual(got, model)
+    })
+
+    it('GetSecurityModel returns null when the body is null', async () =>
+    {
+        FetchStub.Install(null)
+        const got = await new TestClient(new FakeWebSocketFactory()).GetSecurityModel('e')
+        assert.equal(got, null)
+    })
+
+    it('SetSecurityModel PUTs the wrapped model', async () =>
+    {
+        const model = { businessUnits: [], users: [], teams: [], roleAssignments: [], profileAssignments: [], roleOverrides: [], profileOverrides: [] }
+        FetchStub.Install({ ok: true })
+        await new TestClient(new FakeWebSocketFactory()).SetSecurityModel('e', model)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/e/admin/security-model')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'PUT')
+        assert.deepEqual(JSON.parse(FetchStub.Calls[0]!.init?.body as string), { securityModel: model })
+    })
+
+    it('client routes', async () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        const catalog = { roles: [], concepts: [], securedFields: [], profiles: [] }
+        FetchStub.Install(catalog)
+        assert.deepEqual(await c.GetSecurityCatalog('dev'), catalog)
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/dev/admin/security-catalog')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'GET')
+        FetchStub.Install([{ principalId: 'a', origin: 'synced' }])
+        assert.deepEqual(await c.ListTeamMembers('dev', 't 1'), [{ principalId: 'a', origin: 'synced' }])
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/dev/admin/team-members/t%201')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'GET')
+        FetchStub.Install([])
+        assert.deepEqual(await c.ListSecurityChanges('dev'), [])
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/dev/admin/security-changes')
+        assert.equal(FetchStub.Calls[0]!.init?.method, 'GET')
+    })
+
+    it('encodes the env and principalId path segments', async () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        FetchStub.Install({ accounts: [], grants: [] })
+        await c.GetAdminSnapshot('env/A b')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/env%2FA%20b/admin/snapshot')
+        FetchStub.Install({ ok: true })
+        await c.DisableAccount('env/A b', 'u@x/1')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/env%2FA%20b/admin/accounts/u%40x%2F1')
+        FetchStub.Install([])
+        await c.ListTokens('env/A b')
+        assert.equal(FetchStub.Calls[0]!.route, '/tenant-api/environments/env%2FA%20b/admin/tokens')
+    })
+})
+
+describe('TenantApiClient sign-in', () =>
+{
+    it('signs in by OIDC only, from the tenant begin route, and offers no own-password change', () =>
+    {
+        const c = new TestClient(new FakeWebSocketFactory())
+        const navigated: string[] = []
+        c.BeginOidcSignIn({ Assign: (url: string) => { navigated.push(url) } })
+        assert.deepEqual(navigated, ['/tenant-auth/oidc/begin'])
+        assert.equal(c.Config.RedirectsWhenSignedOut, true)
+        assert.equal(c.ChangesPassword, false)
+        assert.equal(c.Config.HidesUnofferedActions, true)
+    })
+})
+
+describe('TenantApiClient sockets', () =>
+{
+    afterEach(() => { FetchStub.Restore() })
+
+    it('OnEvent mints a ticket, opens the events path with it and delivers parsed frames until unsubscribed', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-1' })
+        const sockets = new FakeWebSocketFactory()
+        const c = new TestClient(sockets)
+        const got: TenantEvent[] = []
+        const off = c.OnEvent(ev => { got.push(ev) })
+        await Ticks.Settle()
+        assert.deepEqual(FetchStub.Calls.map(call => [call.route, call.init?.method]), [['/tenant-api/ws-ticket', 'POST']])
+        assert.deepEqual(sockets.Urls, ['ws://host/tenant-api/events'])
+        assert.deepEqual(sockets.Tickets, ['tk-1'])
+        sockets.Sockets[0]!.Push(JSON.stringify({ type: TenantEventType.EnvironmentChanged, environmentName: 'e1' }))
+        assert.deepEqual(got, [{ type: TenantEventType.EnvironmentChanged, environmentName: 'e1' }])
+        sockets.Sockets[0]!.Push('not json')
+        assert.equal(got.length, 1)
+        off()
+        assert.equal(sockets.Sockets[0]!.Closed, true)
+        sockets.Sockets[0]!.Push(JSON.stringify({ type: TenantEventType.HealthChanged, environmentName: 'e2' }))
+        assert.equal(got.length, 1)
+    })
+
+    it('OnEvent shares one socket (and one ticket) across handlers', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-1' })
+        const sockets = new FakeWebSocketFactory()
+        const c = new TestClient(sockets)
+        c.OnEvent(() => {})
+        c.OnEvent(() => {})
+        await Ticks.Settle()
+        assert.equal(FetchStub.Calls.length, 1)
+        assert.equal(sockets.Sockets.length, 1)
+    })
+
+    it('OnEvent opens no socket when every handler left while the ticket was minted', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-1' })
+        const sockets = new FakeWebSocketFactory()
+        const off = new TestClient(sockets).OnEvent(() => {})
+        off()
+        await Ticks.Settle()
+        assert.equal(sockets.Sockets.length, 0)
+    })
+
+    it('OnEvent drops frames with a bogus type or missing environmentName', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-1' })
+        const sockets = new FakeWebSocketFactory()
+        const got: TenantEvent[] = []
+        new TestClient(sockets).OnEvent(ev => { got.push(ev) })
+        await Ticks.Settle()
+        sockets.Sockets[0]!.Push(JSON.stringify({ type: 'bogus', environmentName: 'e1' }))
+        sockets.Sockets[0]!.Push(JSON.stringify({ type: TenantEventType.HealthChanged }))
+        sockets.Sockets[0]!.Push(JSON.stringify({ type: TenantEventType.HealthChanged, environmentName: '' }))
+        assert.equal(got.length, 0)
+        sockets.Sockets[0]!.Push(JSON.stringify({ type: TenantEventType.HealthChanged, environmentName: 'e1' }))
+        assert.equal(got.length, 1)
+    })
+
+    it('OnEvent reconnects with a fresh ticket after close once the delay elapses', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-1' })
+        const sockets = new FakeWebSocketFactory()
+        new TestClient(sockets).OnEvent(() => {})
+        await Ticks.Settle()
+        mock.timers.enable({ apis: ['setTimeout'] })
+        try
+        {
+            sockets.Sockets[0]!.FireClose()
+            assert.equal(sockets.Sockets.length, 1)
+            mock.timers.tick(2000)
+        }
+        finally
+        {
+            mock.timers.reset()
+        }
+        await Ticks.Settle()
+        assert.equal(sockets.Sockets.length, 2)
+        assert.equal(FetchStub.Calls.length, 2)
+        assert.equal(sockets.Urls[1], 'ws://host/tenant-api/events')
+    })
+
+    it('OnEvent does not reconnect when all handlers unsubscribed', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-1' })
+        const sockets = new FakeWebSocketFactory()
+        const off = new TestClient(sockets).OnEvent(() => {})
+        await Ticks.Settle()
+        mock.timers.enable({ apis: ['setTimeout'] })
+        try
+        {
+            sockets.Sockets[0]!.FireClose()
+            off()
+            mock.timers.tick(2000)
+        }
+        finally
+        {
+            mock.timers.reset()
+        }
+        await Ticks.Settle()
+        assert.equal(sockets.Sockets.length, 1)
+    })
+
+    it('a 401 for the events ticket opens no socket, retries nothing and raises Unauthorized', async () =>
+    {
+        FetchStub.Install({ error: 'unauthenticated' }, 401)
+        const sockets = new FakeWebSocketFactory()
+        const c = new TestClient(sockets)
+        let unauthorized = 0
+        c.Unauthorized.subscribe(() => { unauthorized++ })
+        c.OnEvent(() => {})
+        await Ticks.Settle()
+        assert.equal(sockets.Sockets.length, 0)
+        assert.equal(unauthorized, 1)
+    })
+
+    it('OpenLogStream mints a ticket, forwards raw chunks and dispose closes the socket', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-log' })
+        const sockets = new FakeWebSocketFactory()
+        const c = new TestClient(sockets)
+        const chunks: string[] = []
+        const dispose = c.OpenLogStream('e 1', t => { chunks.push(t) })
+        await Ticks.Settle()
+        assert.deepEqual(sockets.Urls, ['ws://host/tenant-api/environments/e%201/logs/stream'])
+        assert.deepEqual(sockets.Tickets, ['tk-log'])
+        sockets.Sockets[0]!.Push('line one\n')
+        assert.deepEqual(chunks, ['line one\n'])
+        dispose()
+        assert.equal(sockets.Sockets[0]!.Closed, true)
+    })
+
+    it('OpenLogStream disposed before its ticket lands opens no socket', async () =>
+    {
+        FetchStub.Install({ ticket: 'tk-log' })
+        const sockets = new FakeWebSocketFactory()
+        const dispose = new TestClient(sockets).OpenLogStream('e1', () => {})
+        dispose()
+        await Ticks.Settle()
+        assert.equal(sockets.Sockets.length, 0)
+    })
+
+    it('OpenLogStream reports the stream closed when no ticket can be minted', async () =>
+    {
+        FetchStub.Install({ error: 'unavailable' }, 503)
+        const sockets = new FakeWebSocketFactory()
+        let closed = 0
+        new TestClient(sockets).OpenLogStream('e1', () => {}, () => { closed++ })
+        await Ticks.Settle()
+        assert.equal(sockets.Sockets.length, 0)
+        assert.equal(closed, 1)
+    })
+})

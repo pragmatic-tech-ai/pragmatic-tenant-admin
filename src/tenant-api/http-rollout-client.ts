@@ -1,0 +1,183 @@
+import { type ManifestRecord, type HiveRolloutStatus, type LedgerAction, RolloutAdoptionRefusedError, RolloutUnavailableError, type AdoptionLedgerDto, type IRolloutClient } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+
+/**
+ * The tenant-admin container's rollout seam over the hive-initiated agent channel: reads the adoptable versions and the
+ * rollout status, and records an adoption (the hive's own agent then rolls locally). The channel scopes everything by the
+ * hive in the path and the per-hive bearer, so the tenantId argument of ManifestsFor is implied by the hive and unused.
+ * The bearer travels only in the Authorization header; no response body or token is ever echoed into an error.
+ */
+export class HttpRolloutClient implements IRolloutClient
+{
+    private static readonly AgentPrefix = '/agent/hives/'
+    private static readonly AdoptableSegment = '/adoptable'
+    private static readonly StatusSegment = '/status'
+    private static readonly AdoptSegment = '/adopt'
+    private static readonly LedgerSegment = '/ledger'
+    private static readonly LimitParam = 'limit'
+    private static readonly ActionKey = 'action'
+    private static readonly AtKey = 'at'
+    private static readonly HiveIdKey = 'hiveId'
+    private static readonly LedgerActions: ReadonlySet<string> = new Set(['gated', 'ungated', 'withdrawn', 'restored', 'selected', 'adopted'])
+    private static readonly AuthorizationHeader = 'Authorization'
+    private static readonly BearerPrefix = 'Bearer '
+    private static readonly ContentTypeHeader = 'Content-Type'
+    private static readonly JsonType = 'application/json'
+    private static readonly MethodGet = 'GET'
+    private static readonly MethodPost = 'POST'
+    private static readonly StatusForbidden = 403
+    private static readonly UnreachableMessage = 'The platform agent channel is unreachable'
+    private static readonly FailedMessagePrefix = 'The platform agent channel answered HTTP '
+    private static readonly RefusedMessage = 'The platform refused to adopt this version'
+    private static readonly VersionKey = 'version'
+    private static readonly TargetVersionKey = 'targetVersion'
+    private static readonly EnvironmentsKey = 'environments'
+    private static readonly IdKey = 'id'
+    private static readonly HiveMismatchMessage = 'The rollout client is bound to a different hive than the one requested'
+    private static readonly MalformedMessage = 'The platform agent channel returned an unreadable response'
+
+    public constructor(
+        private readonly baseUrl: string,
+        private readonly bearerToken: string,
+        private readonly hiveId: string)
+    {
+    }
+
+    public async ManifestsFor(_tenantId: string): Promise<readonly ManifestRecord[]>
+    {
+        const response = await this.Send(HttpRolloutClient.MethodGet, HttpRolloutClient.AdoptableSegment)
+        const body = await this.ReadJson(response)
+        if (!Array.isArray(body) || !body.every(m => HttpRolloutClient.IsManifest(m)))
+        {
+            throw new RolloutUnavailableError(HttpRolloutClient.MalformedMessage)
+        }
+        return body as ManifestRecord[]
+    }
+
+    public async StatusFor(hiveId: string): Promise<HiveRolloutStatus>
+    {
+        this.AssertBoundHive(hiveId)
+        const response = await this.Send(HttpRolloutClient.MethodGet, HttpRolloutClient.StatusSegment)
+        const body = await this.ReadJson(response)
+        if (!HttpRolloutClient.IsStatus(body))
+        {
+            throw new RolloutUnavailableError(HttpRolloutClient.MalformedMessage)
+        }
+        return body
+    }
+
+    public async AdoptTarget(hiveId: string, version: string): Promise<void>
+    {
+        this.AssertBoundHive(hiveId)
+        await this.Send(HttpRolloutClient.MethodPost, HttpRolloutClient.AdoptSegment, JSON.stringify({ [HttpRolloutClient.VersionKey]: version }))
+    }
+
+    public async LedgerFor(hiveId: string, limit: number): Promise<readonly AdoptionLedgerDto[]>
+    {
+        this.AssertBoundHive(hiveId)
+        const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 0
+        const response = await this.Send(HttpRolloutClient.MethodGet, `${HttpRolloutClient.LedgerSegment}?${HttpRolloutClient.LimitParam}=${safeLimit}`)
+        const body = await this.ReadJson(response)
+        if (!Array.isArray(body) || !body.every(e => HttpRolloutClient.IsLedgerDto(e)))
+        {
+            throw new RolloutUnavailableError(HttpRolloutClient.MalformedMessage)
+        }
+        return (body as Array<Record<string, unknown>>).map(e => ({
+            version: e[HttpRolloutClient.VersionKey] as string,
+            action: e[HttpRolloutClient.ActionKey] as LedgerAction,
+            at: e[HttpRolloutClient.AtKey] as string,
+            hiveId: e[HttpRolloutClient.HiveIdKey] as string | undefined
+        }))
+    }
+
+    /** The channel is per-hive: a call for any other hive would silently act on the wrong one, so it is refused. */
+    private AssertBoundHive(hiveId: string): void
+    {
+        if (hiveId !== this.hiveId)
+        {
+            throw new Error(HttpRolloutClient.HiveMismatchMessage)
+        }
+    }
+
+    private static IsManifest(m: unknown): boolean
+    {
+        return m !== null && typeof m === 'object' && typeof (m as Record<string, unknown>)[HttpRolloutClient.IdKey] === 'string'
+    }
+
+    private static IsLedgerDto(e: unknown): boolean
+    {
+        if (e === null || typeof e !== 'object')
+        {
+            return false
+        }
+        const o = e as Record<string, unknown>
+        const action = o[HttpRolloutClient.ActionKey]
+        const hive = o[HttpRolloutClient.HiveIdKey]
+        return typeof o[HttpRolloutClient.VersionKey] === 'string'
+            && typeof action === 'string' && HttpRolloutClient.LedgerActions.has(action)
+            && typeof o[HttpRolloutClient.AtKey] === 'string'
+            && (hive === undefined || typeof hive === 'string')
+    }
+
+    private static IsStatus(b: unknown): b is HiveRolloutStatus
+    {
+        if (b === null || typeof b !== 'object' || Array.isArray(b))
+        {
+            return false
+        }
+        const o = b as Record<string, unknown>
+        const target = o[HttpRolloutClient.TargetVersionKey]
+        return (target === undefined || typeof target === 'string') && Array.isArray(o[HttpRolloutClient.EnvironmentsKey])
+    }
+
+    private async Drain(response: Response): Promise<void>
+    {
+        try
+        {
+            await response.arrayBuffer()
+        }
+        catch
+        {
+            // The body is discarded; a failed drain changes nothing.
+        }
+    }
+
+    private async Send(method: string, segment: string, body?: string): Promise<Response>
+    {
+        const headers: Record<string, string> = { [HttpRolloutClient.AuthorizationHeader]: HttpRolloutClient.BearerPrefix + this.bearerToken }
+        if (body !== undefined)
+        {
+            headers[HttpRolloutClient.ContentTypeHeader] = HttpRolloutClient.JsonType
+        }
+        let response: Response
+        try
+        {
+            response = await fetch(this.baseUrl + HttpRolloutClient.AgentPrefix + encodeURIComponent(this.hiveId) + segment, { method, headers, body })
+        }
+        catch
+        {
+            throw new RolloutUnavailableError(HttpRolloutClient.UnreachableMessage)
+        }
+        if (!response.ok)
+        {
+            await this.Drain(response)
+            if (response.status === HttpRolloutClient.StatusForbidden)
+            {
+                throw new RolloutAdoptionRefusedError(HttpRolloutClient.RefusedMessage)
+            }
+            throw new RolloutUnavailableError(HttpRolloutClient.FailedMessagePrefix + response.status)
+        }
+        return response
+    }
+
+    private async ReadJson(response: Response): Promise<unknown>
+    {
+        try
+        {
+            return await response.json()
+        }
+        catch
+        {
+            throw new RolloutUnavailableError(HttpRolloutClient.MalformedMessage)
+        }
+    }
+}

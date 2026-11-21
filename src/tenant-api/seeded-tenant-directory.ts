@@ -1,0 +1,46 @@
+import type { HiveRecord, TenantRecord, ITenantDirectory, TenantDirectorySeed } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+
+/**
+ * A read-only ITenantDirectory scoped to exactly one tenant and its hives, seeded from startup config.
+ * Any other tenant or hive id resolves to undefined / empty.
+ */
+export class SeededTenantDirectory implements ITenantDirectory
+{
+    private readonly tenant: TenantRecord
+    private readonly hives: readonly HiveRecord[]
+    private readonly organisation: string | undefined
+
+    public constructor(seed: TenantDirectorySeed)
+    {
+        this.tenant = seed.tenant
+        this.hives = [...seed.hives]
+        this.organisation = seed.organisation
+    }
+
+    /** The one seeded tenant (the console's own). */
+    public get Tenant(): TenantRecord
+    {
+        return this.tenant
+    }
+
+    public GetTenant(id: string): TenantRecord | undefined
+    {
+        return id === this.tenant.id ? this.tenant : undefined
+    }
+
+    public GetOrganisation(tenantId: string): string | undefined
+    {
+        return tenantId === this.tenant.id ? this.organisation : undefined
+    }
+
+    public GetHive(id: string): HiveRecord | undefined
+    {
+        return this.hives.find(h => h.id === id)
+    }
+
+    /** With a tenant id, that tenant's hives; with no argument, every seeded hive (the health monitor's IHiveLister read; ITenantDirectory itself requires the id). */
+    public ListHives(tenantId?: string): readonly HiveRecord[]
+    {
+        return tenantId === undefined ? this.hives : this.hives.filter(h => h.tenantId === tenantId)
+    }
+}

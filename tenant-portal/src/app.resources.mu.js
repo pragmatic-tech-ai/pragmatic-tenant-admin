@@ -1,0 +1,127 @@
+import { OverviewSectionService } from "./sections/overview/overview-section-service.js";
+import { TenantSessionService } from "./shell/tenant-session-service.js";
+import { Border, DataTemplate, Dock, DockPanel, Orientation, StackPanel, TextBlock } from "@pragmatic-tech-ai/mural/basic";
+import { Button, ButtonVariant } from "@pragmatic-tech-ai/mural/framework/buttons/button.js";
+import { DataContextBinding, DynamicResource, ResourceDictionary, ServiceBinding, ServiceProvider, Thickness, ToVisibility, VerticalAlignment } from "@pragmatic-tech-ai/mural/runtime";
+import { Pen } from "@pragmatic-tech-ai/mural/visual-engine";
+
+
+const _gate_AppResources = Symbol("AppResources.ctor");
+export class AppResources extends ResourceDictionary {
+    constructor(_g) {
+        super();
+        if (_g !== _gate_AppResources) {
+            throw new Error("AppResources is private — use AppResources.Clone()");
+        }
+    }
+    static Clone() {
+        const t = new AppResources(_gate_AppResources);
+        const _tmpl0 = new DataTemplate((_data) => {
+            const _border1 = new Border();
+            _border1.set_property_value(Border.FillKey, DynamicResource(_border1, "Bg0"));
+            _border1.set_property_value(Border.StrokeKey, ((_e) => { _e.Brush = DynamicResource(_e, "Border"); return _e; })(new Pen()));
+            _border1.set_property_value(Border.PaddingKey, new Thickness(16, 8, 16, 8));
+            const _dockPanel2 = new DockPanel();
+            const _button3 = new Button();
+            _button3.set_property_value(DockPanel.DockKey, Dock.Right);
+            _button3.set_property_value(Button.VariantKey, ButtonVariant.Text);
+            _button3.set_property_value(Button.CommandKey, DataContextBinding(_button3, "LogoutCommand"));
+            _button3.set_property_value(Button.MarginKey, new Thickness(12, 0, 0, 0));
+            const _textBlock4 = new TextBlock();
+            _textBlock4.set_property_value(TextBlock.TextKey, "Log out");
+            _button3.Content = _textBlock4;
+            _dockPanel2.AddChild(_button3);
+            const _button5 = new Button();
+            _button5.set_property_value(DockPanel.DockKey, Dock.Right);
+            _button5.set_property_value(Button.VariantKey, ButtonVariant.Text);
+            _button5.set_property_value(Button.CommandKey, DataContextBinding(_button5, "ChangePasswordCommand"));
+            _button5.set_property_value(Button.MarginKey, new Thickness(12, 0, 0, 0));
+            _button5.set_property_value(Button.VisibilityKey, DataContextBinding(_button5, "ShowsChangePassword", ToVisibility));
+            const _textBlock6 = new TextBlock();
+            _textBlock6.set_property_value(TextBlock.TextKey, "Change password");
+            _button5.Content = _textBlock6;
+            _dockPanel2.AddChild(_button5);
+            const _stackPanel7 = new StackPanel();
+            _stackPanel7.set_property_value(DockPanel.DockKey, Dock.Right);
+            _stackPanel7.set_property_value(StackPanel.OrientationKey, Orientation.Horizontal);
+            _stackPanel7.set_property_value(StackPanel.VerticalAlignmentKey, VerticalAlignment.Center);
+            const _textBlock8 = new TextBlock();
+            _textBlock8.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock8, "Email"));
+            _textBlock8.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock8, "UiLabel"));
+            _textBlock8.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock8, "Fg0"));
+            _textBlock8.set_property_value(TextBlock.MarginKey, new Thickness(0, 0, 8, 0));
+            _stackPanel7.AddChild(_textBlock8);
+            const _textBlock9 = new TextBlock();
+            _textBlock9.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock9, "RoleLabel"));
+            _textBlock9.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock9, "UiCaption"));
+            _textBlock9.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock9, "Fg2"));
+            _stackPanel7.AddChild(_textBlock9);
+            _dockPanel2.AddChild(_stackPanel7);
+            const _button10 = new Button();
+            _button10.set_property_value(DockPanel.DockKey, Dock.Right);
+            _button10.set_property_value(Button.VariantKey, ButtonVariant.Text);
+            _button10.set_property_value(Button.CommandKey, ServiceBinding(_button10, ServiceProvider.tokenFor(OverviewSectionService), "OpenActivityCommand"));
+            _button10.set_property_value(Button.MarginKey, new Thickness(0, 0, 16, 0));
+            const _textBlock11 = new TextBlock();
+            _textBlock11.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock11, "ActivityCountText"));
+            _button10.Content = _textBlock11;
+            _dockPanel2.AddChild(_button10);
+            const _stackPanel12 = new StackPanel();
+            _stackPanel12.set_property_value(StackPanel.OrientationKey, Orientation.Horizontal);
+            _stackPanel12.set_property_value(StackPanel.VerticalAlignmentKey, VerticalAlignment.Center);
+            const _textBlock13 = new TextBlock();
+            _textBlock13.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock13, "ProductName"));
+            _textBlock13.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock13, "UiLabel"));
+            _textBlock13.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock13, "Fg0"));
+            _textBlock13.set_property_value(TextBlock.MarginKey, new Thickness(0, 0, 16, 0));
+            _stackPanel12.AddChild(_textBlock13);
+            const _textBlock14 = new TextBlock();
+            _textBlock14.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock14, "OrganisationLabel"));
+            _textBlock14.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock14, "Fg2"));
+            _textBlock14.set_property_value(TextBlock.VisibilityKey, DataContextBinding(_textBlock14, "HasOrganisation", ToVisibility));
+            _stackPanel12.AddChild(_textBlock14);
+            const _textBlock15 = new TextBlock();
+            _textBlock15.set_property_value(TextBlock.TextKey, " / ");
+            _textBlock15.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock15, "Fg3"));
+            _textBlock15.set_property_value(TextBlock.VisibilityKey, DataContextBinding(_textBlock15, "HasOrganisation", ToVisibility));
+            _stackPanel12.AddChild(_textBlock15);
+            const _textBlock16 = new TextBlock();
+            _textBlock16.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock16, "TenantLabel"));
+            _textBlock16.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock16, "UiLabel"));
+            _textBlock16.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock16, "Fg0"));
+            _textBlock16.set_property_value(TextBlock.MarginKey, new Thickness(0, 0, 8, 0));
+            _stackPanel12.AddChild(_textBlock16);
+            const _textBlock17 = new TextBlock();
+            _textBlock17.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock17, "HiveLabel"));
+            _textBlock17.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock17, "Code"));
+            _textBlock17.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock17, "Fg2"));
+            _textBlock17.set_property_value(TextBlock.MarginKey, new Thickness(0, 0, 16, 0));
+            _stackPanel12.AddChild(_textBlock17);
+            const _textBlock18 = new TextBlock();
+            _textBlock18.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock18, "AccountNotice"));
+            _textBlock18.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock18, "UiCaption"));
+            _textBlock18.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock18, "StateSuccessInk"));
+            _textBlock18.set_property_value(TextBlock.MarginKey, new Thickness(0, 0, 16, 0));
+            _textBlock18.set_property_value(TextBlock.VisibilityKey, DataContextBinding(_textBlock18, "AccountNotice", ToVisibility));
+            _stackPanel12.AddChild(_textBlock18);
+            const _textBlock19 = new TextBlock();
+            _textBlock19.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock19, "AccessNotice"));
+            _textBlock19.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock19, "UiCaption"));
+            _textBlock19.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock19, "StateWarningInk"));
+            _textBlock19.set_property_value(TextBlock.MarginKey, new Thickness(0, 0, 16, 0));
+            _textBlock19.set_property_value(TextBlock.VisibilityKey, DataContextBinding(_textBlock19, "AccessNotice", ToVisibility));
+            _stackPanel12.AddChild(_textBlock19);
+            const _textBlock20 = new TextBlock();
+            _textBlock20.set_property_value(TextBlock.TextKey, DataContextBinding(_textBlock20, "LogoutError"));
+            _textBlock20.set_property_value(TextBlock.StyleKey, DynamicResource(_textBlock20, "UiCaption"));
+            _textBlock20.set_property_value(TextBlock.ForegroundKey, DynamicResource(_textBlock20, "StateDangerInk"));
+            _textBlock20.set_property_value(TextBlock.VisibilityKey, DataContextBinding(_textBlock20, "LogoutError", ToVisibility));
+            _stackPanel12.AddChild(_textBlock20);
+            _dockPanel2.AddChild(_stackPanel12);
+            _border1.SetChild(_dockPanel2);
+            return _border1;
+        }, TenantSessionService);
+        t.Set(TenantSessionService, _tmpl0);
+        return t;
+    }
+}
