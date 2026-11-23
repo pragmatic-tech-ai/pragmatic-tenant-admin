@@ -13,7 +13,7 @@
 // Compare (two versions, or the empty document and a version), and, for a
 // session holding the settings permission, New version (the head's document
 // as JSON text, the server's validation errors by path, the head-moved
-// notice) and Apply (a version to one target environment), then the applies.
+// notice) and Apply (a version to one target environment, with its progress), a secret value, then the applies.
 // Without the permission those two panels are replaced by the reason.
 
 import ConfigurationPageViewModel from "./configuration-page-view-model.js"
@@ -231,6 +231,26 @@ resources ConfigurationResources {
                                            Margin = (0,0,16,0) ]
                                 Button [ Variant = Primary, Command = $ApplyCommand ] {
                                     TextBlock [ Text = "Apply" ]
+                                }
+                            }
+                        }
+                        // While an apply waits for its roll (up to two minutes).
+                        Border [ Fill = @StateWarningSoft, Padding = (12,8,12,8), Margin = (0,8,0,0),
+                                 Visibility = $IsApplying << ToVisibility ] {
+                            TextBlock [ Text = $ApplyingText, Foreground = @StateWarningInk, TextWrapping = Wrap ]
+                        }
+
+                        // A secret value goes into the component's own Secret on the target chosen above; a version names it by
+                        // its reference.
+                        TextBlock [ Text = "Secret for the chosen target", Style = @TenantSectionCaption ]
+                        Border [ Style = @TenantPanel ] {
+                            StackPanel [ Orientation = Horizontal ] {
+                                TextBlock [ Text = "Name", Style = @UiCaption, Foreground = @Fg2, VerticalAlignment = Center, Margin = (0,0,8,0) ]
+                                TextBox [ UsesNativeInput = true, Text = $SecretName, Placeholder = "smtp-password", Margin = (0,0,16,0) ]
+                                TextBlock [ Text = "Value", Style = @UiCaption, Foreground = @Fg2, VerticalAlignment = Center, Margin = (0,0,8,0) ]
+                                TextBox [ UsesNativeInput = true, IsPassword = true, Text = $SecretValue, Margin = (0,0,16,0) ]
+                                Button [ Variant = Secondary, Command = $SecretCommand ] {
+                                    TextBlock [ Text = "Save secret" ]
                                 }
                             }
                         }

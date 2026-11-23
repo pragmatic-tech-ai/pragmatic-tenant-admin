@@ -18,7 +18,15 @@ C5.3 folds that package back into this repository.
 The console reads `PRAGMATIC_TENANT_ADMIN_*` (port, bind, data root, database URL file, portal folder, external
 scheme/port, ingress TLS, rollout link, ...), the platform's `PRAGMATIC_IDP_*` injection and the delivered seed; the
 component descriptor (`src/tenant-admin-component.ts`, golden in `src/tests/fixtures`) lists every setting with its
-source and description.
+source and description. At start the mounted `pragmatic-config-pragmatic-tenant-admin` is laid over those variables
+(`ComponentStartConfiguration`); one it cannot start with exits 78, after putting back what the console ran before when
+it was the console's own apply (`src/configuration/console-start-fallback.ts`).
+
+The console configures every hive component it finds by label (`src/configuration/`): descriptors from the mounted set
+of the release it runs (`PRAGMATIC_TENANT_ADMIN_DESCRIPTORS_DIR`, default `/etc/pragmatic/descriptors`) and, with release
+keys mounted (`PRAGMATIC_TENANT_ADMIN_RELEASE_KEYS_DIR`), from the adopted releases `PRAGMATIC_TENANT_ADMIN_RELEASES` in
+the release registry; applies are watched (120 s) and reverted when the new pods never become ready; secret values go
+into the component's own Secret on the chosen target.
 
 ## Development
 
@@ -36,4 +44,4 @@ The image is built from `Dockerfile` with `docker-bake.hcl` in two steps (the he
 CI and the image release (tag `v<version>`, equal to `package.json`'s version) run pragmatic-shared's reusable container
 workflows. The build files are rendered by `pragmatic-container-template` (`@pragmatic-tech-ai/pragmatic-release-toolkit`):
 
-    npx pragmatic-container-template render --app pragmatic-tenant-admin --entry src/bin/pragmatic-tenant-admind.ts --ui tenant-portal --asset src/descriptors=dist/descriptors --out .
+    npx pragmatic-container-template render --app pragmatic-tenant-admin --entry src/bin/pragmatic-tenant-admind.ts --ui tenant-portal --out .

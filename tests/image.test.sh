@@ -27,7 +27,6 @@ fail()
 EXPECTED=(
     "$APP_ROOT/dist/bin/pragmatic-tenant-admind.js"
     "$APP_ROOT/dist/bin/pragmatic-tenant-admin-import.js"
-    "$APP_ROOT/dist/descriptors/digests.json"
     "$APP_ROOT/tenant-portal/dist/index.html"
     "$APP_ROOT/node_modules/@pragmatic-tech-ai/pragmatic-tenant-plane/templates"
     "$APP_ROOT/node_modules/@pragmatic-tech-ai/pragmatic-tenant-plane/environments/sample-apps"

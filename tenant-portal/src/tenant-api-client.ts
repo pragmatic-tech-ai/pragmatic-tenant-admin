@@ -1,7 +1,7 @@
 import { ApiError, AppSessionClient, BrowserPage, type FetchFunction, type IPageLocation } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantShell } from './shell/tenant-shell.js'
 import { TenantEventType } from './tenant-types.js'
-import type { AdminSnapshotDto, AdoptionLedgerDto, ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveHealthDto, HiveRolloutDto, IReleasesSource, IssueTokenParams, ISecurityModelSource, ITokensSource, IUsersAccessSource, IWebSocketFactory, IWebSocketLike, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TenantEvent, TeamMemberDto, TenantProfileDto, TokenIssuedDto } from './tenant-types.js'
+import type { AdminSnapshotDto, AdoptionLedgerDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveHealthDto, HiveRolloutDto, IReleasesSource, IssueTokenParams, ISecurityModelSource, ITokensSource, IUsersAccessSource, IWebSocketFactory, IWebSocketLike, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TenantEvent, TeamMemberDto, TenantProfileDto, TokenIssuedDto } from './tenant-types.js'
 
 // The shell's error type: thrown for every non-2xx tenant-surface answer, its message the server's error text.
 export { ApiError }
@@ -65,6 +65,7 @@ export class TenantApiClient extends AppSessionClient implements IReleasesSource
     private static readonly ConfigurationComponentsRoute = '/tenant-api/configuration/components'
     private static readonly VersionsLeaf = 'versions'
     private static readonly ApplyLeaf = 'apply'
+    private static readonly SecretsLeaf = 'secrets'
     private static readonly DiffQuery = 'diff?from='
     private static readonly ToParam = '&to='
     private static readonly RolloutLeaf = 'rollout'
@@ -310,6 +311,13 @@ export class TenantApiClient extends AppSessionClient implements IReleasesSource
     {
         return await this.Post<ConfigurationApplyDto>(this.VersionRoute(component, version) + TenantApiClient.PathSeparator + TenantApiClient.ApplyLeaf,
             { environment })
+    }
+
+    // Writes a secret value for a component's target into its own Secret; the reply is the reference to use (never the value).
+    public async PutConfigurationSecret(component: string, environment: string, name: string, value: string): Promise<ConfigurationSecretDto>
+    {
+        return await this.Put<ConfigurationSecretDto>(this.ComponentRoute(component) + TenantApiClient.PathSeparator + TenantApiClient.SecretsLeaf
+            + TenantApiClient.PathSeparator + encodeURIComponent(name), { value, environment })
     }
 
     // Registers a handler on the shared events socket (opened lazily); returns an unsubscribe.

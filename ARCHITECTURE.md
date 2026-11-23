@@ -19,8 +19,12 @@ The console's composition and its in-hive seams live here; the tenant plane it c
 | `src/tenant-api/seeded-tenant-directory.ts` | `SeededTenantDirectory`: a read-only directory of exactly the seeded tenant and its hives. |
 | `src/tenant-api/http-rollout-client.ts` | `HttpRolloutClient`: adoptable versions, rollout status and adoption over the hive's agent channel. |
 | `src/tenant-api/unconfigured-rollout-client.ts` | `UnconfiguredRolloutClient`: no rollout link yet; fails closed (503). |
-| `src/configuration/console-components.ts` | `ConsoleComponents`: the descriptors the console validates configurations against, the others from the vendored set. |
-| `src/descriptors/` | The vendored, digest-pinned component descriptors (`digests.json`), staged at `dist/descriptors` in the image. |
+| `src/configuration/console-configuration.ts` | `ConsoleConfiguration`: composes the configuration service (catalogue, label targets, watched applier, secret writer). |
+| `src/configuration/release-descriptor-catalogue.ts` | `ReleaseDescriptorCatalogue`: descriptors from the mounted release set, then the signed adopted releases. |
+| `src/configuration/label-configuration-targets.ts` | `LabelConfigurationTargets`: a component's Deployments by label, with the descriptor digest their image carries. |
+| `src/configuration/kube-configuration-applier.ts`, `rollout-watch.ts` | The watched apply: ConfigMap and hash, wait for the roll, revert when it never readies. |
+| `src/configuration/console-self-apply.ts`, `console-start-fallback.ts` | The console configuring itself: what ran before kept, put back by a start it refuses, the apply settled. |
+| `src/configuration/component-secret-writer.ts` | `ComponentSecretWriter`: secret values into `pragmatic-secrets-<component>` of one target. |
 | `src/tenant-admin-component.ts` | `TenantAdminComponent`: the component descriptor (version = `package.json` version). |
 | `src/release-components.ts` | `Components`: the descriptor source the image build reads (`pragmatic-component-descriptors --components dist/release-components.js`). |
 | `tenant-portal/` | The tenant portal SPA (Mural, `pragmatic-app-shell`), built to `tenant-portal/dist`, the console's static root. |
@@ -32,8 +36,7 @@ Tests:
   API routes the console mounts, configuration, the descriptor golden and its readers. Its support files are copies made
   at the split (`component-golden.ts`, `component-sources.ts` from pragmatic-server's component tests;
   `res-recorder.ts`, `tenant-test-sessions.ts`, also copied into pragmatic-tenant-plane's tests).
-- `tests/*.test.ts` (`npm test`): the release module's descriptor and the vendored file equal the pragmatic-server
-  golden digest, one installed copy of TODL, todl-runtime and Mural, and the entry's closure carries none of the dev-box
+- `tests/*.test.ts` (`npm test`): the release module's descriptor equals the pinned digest, one installed copy of TODL, todl-runtime and Mural, and the entry's closure carries none of the dev-box
   drivers.
 - `tests/image.test.sh <image>` (CI, after the bake): the runtime files are in the image and the entry stops on missing
   configuration, never on a missing module.

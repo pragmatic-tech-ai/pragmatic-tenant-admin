@@ -3,7 +3,7 @@ import { AdminCapability } from '../../shell/admin-capability.js'
 import { OptionViewModel } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantPageViewModel } from '../../shell/tenant-page-view-model.js'
 import type { TenantSessionService } from '../../shell/tenant-session-service.js'
-import { ConfigurationApplyOutcome } from '../../tenant-types.js'
+import { ConfigurationApplyDetails, ConfigurationApplyOutcome } from '../../tenant-types.js'
 import type { ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationDiffDto, ConfigurationTargetDto } from '../../tenant-types.js'
 import { ConfigurationEditorViewModel } from './configuration-editor-view-model.js'
 import type { IConfigurationNavigator } from './configuration-page-view-model.js'
@@ -44,6 +44,19 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private static readonly SelectedApplyVersionProperty = 'SelectedApplyVersion'
     private static readonly SelectedTargetProperty = 'SelectedTarget'
     private static readonly NoticeTextProperty = 'NoticeText'
+    private static readonly IsApplyingProperty = 'IsApplying'
+    private static readonly ApplyingTextProperty = 'ApplyingText'
+    private static readonly SecretNameProperty = 'SecretName'
+    private static readonly SecretValueProperty = 'SecretValue'
+    private static readonly ApplyingPrefix = 'Applying version '
+    private static readonly ApplyingSuffix = ': waiting up to two minutes for the new pods to become ready.'
+    private static readonly ConsoleComponent = 'pragmatic-tenant-admin'
+    private static readonly ConsoleApplyingSuffix = ': the console restarts with it; reload this page in a minute. A configuration it cannot start with is put back.'
+    private static readonly RevertedPrefix = 'Version '
+    private static readonly RevertedInfix = ' did not become ready on '
+    private static readonly RevertedSuffix = ': the previous configuration is running again.'
+    private static readonly SecretSavedPrefix = 'Saved secret '
+    private static readonly SecretSavedInfix = '; refer to it as '
     private static readonly EditorTextProperty = 'Text'
     private static readonly ComponentVersionPrefix = 'Component version '
     private static readonly NoHead = 'No versions yet'
@@ -70,6 +83,10 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private readonly saveCommand: RelayCommand
     private readonly reloadEditorCommand: RelayCommand
     private readonly applyCommand: RelayCommand
+    private readonly secretCommand: RelayCommand
+    private applying = false
+    private secretName = ComponentConfigurationPageViewModel.NoText
+    private secretValue = ComponentConfigurationPageViewModel.NoText
     private detail: ConfigurationComponentDetailDto | undefined
     private head: number | null = null
     private settingRows = new ObservableCollection<ConfigurationSettingRowViewModel>()
@@ -98,7 +115,9 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         this.saveCommand = this.MutatingCommand(AdminCapability.Settings, () => this.Save(), () => this.editor.CanSave)
         this.reloadEditorCommand = new RelayCommand(() => { void this.ReloadEditor() })
         this.applyCommand = this.MutatingCommand(AdminCapability.Settings, () => this.Apply(),
-            () => this.selectedApplyVersion !== undefined && this.selectedTarget !== undefined)
+            () => !this.applying && this.selectedApplyVersion !== undefined && this.selectedTarget !== undefined)
+        this.secretCommand = this.MutatingCommand(AdminCapability.Settings, () => this.WriteSecret(),
+            () => this.selectedTarget !== undefined && this.secretName.trim() !== ComponentConfigurationPageViewModel.NoText && this.secretValue !== ComponentConfigurationPageViewModel.NoText)
         this.editor.PropertyChanged(ComponentConfigurationPageViewModel.EditorTextProperty).subscribe(() => this.RaiseMutatingCommandsChanged())
     }
 
@@ -334,6 +353,53 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         return this.noticeText
     }
 
+    // An apply is waiting for its roll (up to two minutes on the server).
+    public get IsApplying(): boolean
+    {
+        return this.applying
+    }
+
+    public get ApplyingText(): string
+    {
+        const P = ComponentConfigurationPageViewModel
+        const version = this.selectedApplyVersion?.Value
+        const suffix = this.component === P.ConsoleComponent ? P.ConsoleApplyingSuffix : P.ApplyingSuffix
+        return !this.applying || version === undefined ? P.NoText : P.ApplyingPrefix + String(version) + P.ToWord + (this.selectedTarget?.Value ?? P.NoText) + suffix
+    }
+
+    // A secret value for this component on the chosen target: written into its own Secret there, answered by the
+    // reference to put in a version.
+    public get SecretName(): string
+    {
+        return this.secretName
+    }
+
+    public set SecretName(next: string)
+    {
+        const old = this.secretName
+        this.secretName = next
+        this.RaiseIfChanged(ComponentConfigurationPageViewModel.SecretNameProperty, old, next)
+        this.RaiseMutatingCommandsChanged()
+    }
+
+    public get SecretValue(): string
+    {
+        return this.secretValue
+    }
+
+    public set SecretValue(next: string)
+    {
+        const old = this.secretValue
+        this.secretValue = next
+        this.RaiseIfChanged(ComponentConfigurationPageViewModel.SecretValueProperty, old, next)
+        this.RaiseMutatingCommandsChanged()
+    }
+
+    public get SecretCommand(): RelayCommand
+    {
+        return this.secretCommand
+    }
+
     // Edits need the settings permission (the tenant admin role); reads are open.
     protected override get PageCapability(): AdminCapability
     {
@@ -501,9 +567,43 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
             return
         }
         this.SetNotice(ComponentConfigurationPageViewModel.NoText)
-        const record = await this.Session.Client.ApplyConfigurationVersion(this.component, version, environment)
-        this.SetNotice(ComponentConfigurationPageViewModel.ApplyNotice(record))
+        this.SetApplying(true)
+        try
+        {
+            const record = await this.Session.Client.ApplyConfigurationVersion(this.component, version, environment)
+            this.SetNotice(ComponentConfigurationPageViewModel.ApplyNotice(record))
+        }
+        finally
+        {
+            this.SetApplying(false)
+        }
         await this.Refresh()
+    }
+
+    private SetApplying(next: boolean): void
+    {
+        const P = ComponentConfigurationPageViewModel
+        const oldText = this.ApplyingText
+        const old = this.applying
+        this.applying = next
+        this.RaiseIfChanged(P.IsApplyingProperty, old, next)
+        this.RaiseIfChanged(P.ApplyingTextProperty, oldText, this.ApplyingText)
+        this.RaiseMutatingCommandsChanged()
+    }
+
+    private async WriteSecret(): Promise<void>
+    {
+        const P = ComponentConfigurationPageViewModel
+        const name = this.secretName.trim()
+        const environment = this.selectedTarget?.Value
+        if (environment === undefined)
+        {
+            return
+        }
+        const written = await this.Session.Client.PutConfigurationSecret(this.component, environment, name, this.secretValue)
+        // The value leaves the page once written: only its reference stays.
+        this.SecretValue = P.NoText
+        this.SetNotice(P.SecretSavedPrefix + written.name + P.SecretSavedInfix + written.reference + P.SentenceEnd)
     }
 
     private SetNotice(next: string): void
@@ -548,6 +648,10 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         if (record.outcome === ConfigurationApplyOutcome.Applied)
         {
             return P.AppliedPrefix + what + P.SentenceEnd
+        }
+        if (record.detail === ConfigurationApplyDetails.RolloutNotReady)
+        {
+            return P.RevertedPrefix + String(record.version) + P.RevertedInfix + record.environment + P.RevertedSuffix
         }
         return P.ApplyFailedPrefix + what + P.FailedWord + (record.detail === null ? P.SentenceEnd : P.DetailSeparator + record.detail)
     }

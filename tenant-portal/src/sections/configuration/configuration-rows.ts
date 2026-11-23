@@ -1,7 +1,7 @@
 import { RelayCommand } from '@pragmatic-tech-ai/mural/runtime'
 import { Observable } from '@pragmatic-tech-ai/todl-runtime'
 import { UtcText } from '../../shell/utc-text.js'
-import { ConfigurationApplyOutcome, ConfigurationChangeKind } from '../../tenant-types.js'
+import { ConfigurationApplyDetails, ConfigurationApplyOutcome, ConfigurationChangeKind } from '../../tenant-types.js'
 import type { ConfigurationApplyDto, ConfigurationChangeDto, ConfigurationOptionDto, ConfigurationSettingDto, ConfigurationTargetDto, ConfigurationValidationErrorDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
 
 // How the configuration pages write versions and values.
@@ -158,6 +158,9 @@ export class ConfigurationApplyRowViewModel extends Observable
 {
     private static readonly AppliedLabel = 'Applied'
     private static readonly FailedLabel = 'Failed'
+    private static readonly RevertedLabel = 'Reverted'
+    private static readonly PendingLabel = 'Applying'
+    private static readonly RevertedDetail = 'The new pods did not become ready in time; the previous configuration is running again.'
     private static readonly NoDetail = ''
 
     public constructor(private readonly apply: ConfigurationApplyDto)
@@ -177,12 +180,27 @@ export class ConfigurationApplyRowViewModel extends Observable
 
     public get OutcomeText(): string
     {
-        return this.apply.outcome === ConfigurationApplyOutcome.Applied ? ConfigurationApplyRowViewModel.AppliedLabel : ConfigurationApplyRowViewModel.FailedLabel
+        const R = ConfigurationApplyRowViewModel
+        switch (this.apply.outcome)
+        {
+            case ConfigurationApplyOutcome.Applied:
+                return R.AppliedLabel
+            case ConfigurationApplyOutcome.Pending:
+                return R.PendingLabel
+            default:
+                return this.IsReverted ? R.RevertedLabel : R.FailedLabel
+        }
     }
 
     public get IsFailed(): boolean
     {
-        return this.apply.outcome !== ConfigurationApplyOutcome.Applied
+        return this.apply.outcome === ConfigurationApplyOutcome.Failed
+    }
+
+    // Failed because the new pods never became ready, and put back to the previous configuration.
+    public get IsReverted(): boolean
+    {
+        return this.apply.outcome === ConfigurationApplyOutcome.Failed && this.apply.detail === ConfigurationApplyDetails.RolloutNotReady
     }
 
     public get RequestedBy(): string
@@ -197,7 +215,8 @@ export class ConfigurationApplyRowViewModel extends Observable
 
     public get DetailText(): string
     {
-        return this.apply.detail ?? ConfigurationApplyRowViewModel.NoDetail
+        const R = ConfigurationApplyRowViewModel
+        return this.IsReverted ? R.RevertedDetail : this.apply.detail ?? R.NoDetail
     }
 }
 

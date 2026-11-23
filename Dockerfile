@@ -23,7 +23,6 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=true \
 FROM deps AS compile
 COPY . .
 RUN npm run build
-RUN rm -rf dist/descriptors && mkdir -p dist && cp -r src/descriptors dist/descriptors
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=true \
     cd tenant-portal && npm ci --no-audit --no-fund && npm run build && rm -rf node_modules
 # closure.json, this Dockerfile and the code must agree (package.json `pragmaticClosureCheck`), checked on the very tree

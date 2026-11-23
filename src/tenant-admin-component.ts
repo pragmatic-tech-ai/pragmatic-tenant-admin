@@ -4,16 +4,19 @@ import { TenantRoles } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 /**
  * The component descriptor of the tenant admin image (pragmatic-tenant-admind, the console that ships into a client hive):
  * the `TenantAdminEnv` contract as `TenantAdminServer`, `InjectedIdpService` and `IngressTlsPolicy` read it. Stores in
- * Postgres (A5). Declares its application role (`environment-admin`; the tenant role `admin` is the realm's own). Its port is
+ * Postgres (A5). Settings that bind the console to the platform or to its trust roots (the rollout link and its token, the
+ * injected IdP, the release descriptors, keys and registry) are the platform's, injected by the hive manifests: they are
+ * left out of the descriptor, so no tenant configuration can set them. Declares its application role (`environment-admin`; the tenant role `admin` is the realm's own). Its port is
  * configuration with no default; 7100 is the port the console installer gives it in a hive.
  */
 export class TenantAdminComponent
 {
     public static readonly Name = 'pragmatic-tenant-admin'
     /** The descriptor version: this application's package version (the release test pins it to package.json). */
-    public static readonly Version = '0.1.0'
+    public static readonly Version = '0.1.1'
 
-    private static readonly Declaration: ComponentDeclaration = {
+    /** The declaration: the descriptor, and the variable the start step overlays each configured setting onto. */
+    public static readonly Declaration: ComponentDeclaration = {
         name: TenantAdminComponent.Name,
         version: TenantAdminComponent.Version,
         options: [
@@ -36,25 +39,6 @@ export class TenantAdminComponent
                     { name: 'healthProbeTimeoutMs', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_TIMEOUT_MS', default: 60000, description: 'Timeout of one environment health probe, in milliseconds.' },
                     { name: 'consoleHost', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_CONSOLE_HOST', description: 'Browser host the console is served on through its Ingress.' },
                     { name: 'fingerprintKey', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_FINGERPRINT_KEY_FILE', secret: true, description: 'The account-email fingerprint key (a mounted secret file).' },
-                ],
-            },
-            {
-                name: 'rollout',
-                description: 'The HTTP rollout client to the platform agent channel (in-process rollout when off).',
-                settings: [
-                    { name: 'url', type: SettingType.Url, source: 'PRAGMATIC_TENANT_ADMIN_ROLLOUT_URL', required: true, description: 'Base URL of the platform agent channel.' },
-                    { name: 'token', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_ROLLOUT_TOKEN', required: true, secret: true, description: 'The bearer token of the hive on the agent channel.' },
-                    { name: 'hiveId', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_ROLLOUT_HIVE_ID', required: true, description: 'The hive the rollout client is bound to.' },
-                ],
-            },
-            {
-                name: 'idp',
-                description: 'The injected tenant IdP the console connects to (a local IdP is used when off).',
-                settings: [
-                    { name: 'browserBaseUrl', type: SettingType.Url, source: 'PRAGMATIC_IDP_BROWSER_BASE_URL', required: true, description: 'The browser-facing IdP origin (the issuer).' },
-                    { name: 'baseUrl', type: SettingType.Url, source: 'PRAGMATIC_IDP_BASE_URL', description: 'The in-cluster IdP origin for token, jwks and admin calls (defaults to browserBaseUrl).' },
-                    { name: 'caFile', type: SettingType.String, source: 'PRAGMATIC_IDP_CA_FILE', required: true, description: 'Path of the IdP CA certificate.' },
-                    { name: 'adminToken', type: SettingType.String, source: 'PRAGMATIC_IDP_ADMIN_TOKEN_FILE', required: true, secret: true, description: 'The IdP admin token (a mounted secret file, never an inline value).' },
                 ],
             },
             {

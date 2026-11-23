@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "component": "pragmatic-tenant-admin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "options": [
     {
       "name": "core",
@@ -118,67 +118,6 @@
           "required": false,
           "secret": true,
           "description": "PRAGMATIC_TENANT_ADMIN_FINGERPRINT_KEY_FILE: The account-email fingerprint key (a mounted secret file)."
-        }
-      ]
-    },
-    {
-      "name": "rollout",
-      "description": "The HTTP rollout client to the platform agent channel (in-process rollout when off).",
-      "settings": [
-        {
-          "name": "url",
-          "type": "url",
-          "required": true,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_ROLLOUT_URL: Base URL of the platform agent channel."
-        },
-        {
-          "name": "token",
-          "type": "string",
-          "required": true,
-          "secret": true,
-          "description": "PRAGMATIC_TENANT_ADMIN_ROLLOUT_TOKEN: The bearer token of the hive on the agent channel."
-        },
-        {
-          "name": "hiveId",
-          "type": "string",
-          "required": true,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_ROLLOUT_HIVE_ID: The hive the rollout client is bound to."
-        }
-      ]
-    },
-    {
-      "name": "idp",
-      "description": "The injected tenant IdP the console connects to (a local IdP is used when off).",
-      "settings": [
-        {
-          "name": "browserBaseUrl",
-          "type": "url",
-          "required": true,
-          "secret": false,
-          "description": "PRAGMATIC_IDP_BROWSER_BASE_URL: The browser-facing IdP origin (the issuer)."
-        },
-        {
-          "name": "baseUrl",
-          "type": "url",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_IDP_BASE_URL: The in-cluster IdP origin for token, jwks and admin calls (defaults to browserBaseUrl)."
-        },
-        {
-          "name": "caFile",
-          "type": "string",
-          "required": true,
-          "secret": false,
-          "description": "PRAGMATIC_IDP_CA_FILE: Path of the IdP CA certificate."
-        },
-        {
-          "name": "adminToken",
-          "type": "string",
-          "required": true,
-          "secret": true,
-          "description": "PRAGMATIC_IDP_ADMIN_TOKEN_FILE: The IdP admin token (a mounted secret file, never an inline value)."
         }
       ]
     },

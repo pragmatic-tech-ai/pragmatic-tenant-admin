@@ -6,7 +6,7 @@ import { DialogService, type DialogOptions } from '@pragmatic-tech-ai/mural/fram
 import { NavigationService } from '@pragmatic-tech-ai/mural/framework/shell/services/navigation-service.js'
 import { ApiError, type TenantApiClient } from '../../tenant-api-client.js'
 import { ConfigurationApplyOutcome, EnvStatus, EnvType, Template } from '../../tenant-types.js'
-import type { ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationOptionDto, ConfigurationTargetDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
+import type { ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationOptionDto, ConfigurationTargetDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
 import type { AdminCapabilitiesDto, AdminSnapshotDto, AdoptionLedgerDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveHealthDto, HiveRolloutDto, IssueTokenParams, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TeamMemberDto, TenantEvent, TenantProfileDto, TokenIssuedDto } from '../../tenant-types.js'
 import { AppSession, type IPageReloader } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { Signal } from '@pragmatic-tech-ai/todl-runtime'
@@ -266,6 +266,16 @@ export class FakeTenantApi
             target.applied = version
         }
         return record
+    }
+
+    // Recorded as ['PutConfigurationSecret', component, environment, name] (never the value); the value is kept in Secrets.
+    public readonly Secrets = new Map<string, string>()
+
+    public async PutConfigurationSecret(component: string, environment: string, name: string, value: string): Promise<ConfigurationSecretDto>
+    {
+        await this.Enter('PutConfigurationSecret', component, environment, name)
+        this.Secrets.set(component + '/' + environment + '/' + name, value)
+        return { name, reference: 'secret:file/' + name }
     }
 
     private HeadOf(component: string): number | null

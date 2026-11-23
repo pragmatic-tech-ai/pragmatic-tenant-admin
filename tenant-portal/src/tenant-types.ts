@@ -410,7 +410,8 @@ export interface ConnectionStatus
 // The configuration repository (/tenant-api/configuration/), mirrored by hand from the server. A version number is
 // 1-based; 0 names the empty document (a diff's "from" before the first version). Secret settings hold secret
 // references (`secret:<store>/<name>`), never values.
-export type ConfigurationTargetDto = { environment: string; hive: string; namespace: string; deployment: string; applied: number | null }
+// One target: its environment (or namespace), where it is, the component version its image runs when known, what is applied.
+export type ConfigurationTargetDto = { environment: string; hive: string; namespace: string; deployment: string; componentVersion?: string | null; descriptorDigest?: string | null; applied: number | null }
 
 export type ConfigurationComponentDto = {
     component: string
@@ -436,9 +437,19 @@ export type ConfigurationVersionSummaryDto = {
 // How an apply ended; values match the server wire strings.
 export enum ConfigurationApplyOutcome
 {
+    Pending = 'pending',
     Applied = 'applied',
     Failed = 'failed',
 }
+
+// The detail of an apply whose new pods did not become ready: the previous configuration was restored.
+export class ConfigurationApplyDetails
+{
+    public static readonly RolloutNotReady = 'rollout-not-ready'
+}
+
+// A secret written for a component: the reference a configuration names it by (never the value).
+export type ConfigurationSecretDto = { name: string; reference: string }
 
 export type ConfigurationApplyDto = {
     id: string

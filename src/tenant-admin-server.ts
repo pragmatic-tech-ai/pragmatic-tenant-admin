@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { UserSeeder, AdminProxy, WsAdminConnector, AuditRegistry, BundleBuilderAdapter, UserSeederAdapter, NoHostEnvironmentRuntime, EnvironmentRuntimeResolver, InClusterEnvironmentRuntime, EnvironmentPlacement, EnvironmentRegistry, EnvironmentService, GraphService, TenantGraphAccess, type IEnvironmentReach, HiveHealthProducer, HiveOrchestratorFactory, type InClusterOrchestration, IngressTlsPolicy, type IngressTls, IdpAdminClient, type IIdpService, MasterKeyFile, NetPortProbe, PortAllocator, TenantPlaneComposer, type HiveRecord, type TenantRecord, ConsoleFingerprint, ConsoleAdvertSender, HttpConsoleAdvertTransport, IntervalAdvertTimer, SeededConsoleAccounts, type IOwnerResetFollower, ConsoleEmailDomainStore, ConsoleFingerprintKeys, ConsoleRegistration, type IRecordMap, type IRolloutClient, TenantAdminEnv, TenantAdminClientRegistry, TenantHostResolver, type ConsoleHostAlias, type TenantPlane, TenantSessions, TenantHealthMonitor, TenantConsoleHost, ConfigurationService, ConfigurationTargets, KubeConfigurationApplier, UnavailableConfigurationApplier } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { UserSeeder, AdminProxy, WsAdminConnector, AuditRegistry, BundleBuilderAdapter, UserSeederAdapter, NoHostEnvironmentRuntime, EnvironmentRuntimeResolver, InClusterEnvironmentRuntime, EnvironmentPlacement, EnvironmentRegistry, EnvironmentService, GraphService, TenantGraphAccess, type IEnvironmentReach, HiveHealthProducer, HiveOrchestratorFactory, type InClusterOrchestration, IngressTlsPolicy, type IngressTls, IdpAdminClient, type IIdpService, MasterKeyFile, NetPortProbe, PortAllocator, TenantPlaneComposer, type HiveRecord, type TenantRecord, ConsoleFingerprint, ConsoleAdvertSender, HttpConsoleAdvertTransport, IntervalAdvertTimer, SeededConsoleAccounts, type IOwnerResetFollower, ConsoleEmailDomainStore, ConsoleFingerprintKeys, ConsoleRegistration, type IRecordMap, type IRolloutClient, TenantAdminEnv, TenantAdminClientRegistry, TenantHostResolver, type ConsoleHostAlias, type TenantPlane, TenantSessions, TenantHealthMonitor, TenantConsoleHost } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { InClusterEnvironmentReach } from './in-cluster-environment-reach.js'
 import { HttpsKubeTransport, InClusterServiceAccount, KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import type { PinnedImageVerifier } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
@@ -14,7 +14,11 @@ import { TenantAdminDatabase, TenantAdminRegistry } from './tenant-admin-databas
 import { TenantAdminImport } from './tenant-admin-import.js'
 import { UnconfiguredRolloutClient } from './tenant-api/unconfigured-rollout-client.js'
 import { HttpRolloutClient } from './tenant-api/http-rollout-client.js'
-import { ConsoleComponents } from './configuration/console-components.js'
+import { ConsoleConfiguration } from './configuration/console-configuration.js'
+import { TenantAdminComponent } from './tenant-admin-component.js'
+import { SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ConsoleStartFallback } from './configuration/console-start-fallback.js'
+import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
 
 export type TenantAdminConfig = {
     readonly dataRoot: string
@@ -48,6 +52,8 @@ type AdvertSettings = {
 }
 
 export type TenantAdminComposition = {
+    /** The console as its own configuration target; undefined outside a pod. */
+    readonly selfApply: ConsoleSelfApply | undefined
     readonly directory: SeededTenantDirectory
     readonly rollout: IRolloutClient
     readonly plane: TenantPlane
@@ -112,7 +118,9 @@ export class TenantAdminServer
     /** Entry point used by the bin: reads config from the environment and runs with the default rollout client. */
     public static async Main(): Promise<void>
     {
-        const config = TenantAdminServer.ReadConfig(process.env)
+        // First of all: the applied configuration (the mounted pragmatic-config-pragmatic-tenant-admin) over the environment;
+        // a configuration the console applied to itself that refuses its start is put back before it exits.
+        const config = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, process.env, env => TenantAdminServer.ReadConfig(env))
         await new TenantAdminServer(config, TenantAdminServer.RolloutClientFrom(process.env)).Run()
     }
 
@@ -126,7 +134,7 @@ export class TenantAdminServer
         }
         return new HttpRolloutClient(
             url,
-            TenantAdminServer.Required(env, TenantAdminEnv.RolloutToken),
+            TenantAdminServer.RequiredSecret(env, TenantAdminEnv.RolloutToken),
             TenantAdminServer.Required(env, TenantAdminEnv.RolloutHiveId))
     }
 
@@ -179,7 +187,7 @@ export class TenantAdminServer
     {
         const S = TenantAdminServer
         const url = S.OptionalOf(env, TenantAdminEnv.RolloutUrl)
-        const token = S.OptionalOf(env, TenantAdminEnv.RolloutToken)
+        const token = SecretVariable.Read(env, TenantAdminEnv.RolloutToken)
         const hiveId = S.OptionalOf(env, TenantAdminEnv.RolloutHiveId)
         if (cfg.consoleHost === undefined)
         {
@@ -359,10 +367,13 @@ export class TenantAdminServer
             EmailDomains: emailDomains,
             ConsoleTenantId: tenant.id,
             Graphs: graphs,
-            // The console writes configurations next to its environments' deployments through its own cluster access.
-            Configuration: new ConfigurationService(await db.Configuration(), ConsoleComponents.Release(), new ConfigurationTargets(registry),
-                inCluster === undefined ? new UnavailableConfigurationApplier() : new KubeConfigurationApplier(inCluster.client)),
+            // The console configures every hive component it finds by label, through its own cluster access.
+            Configuration: ConsoleConfiguration.Compose({
+                Env: env, Repository: await db.Configuration(), Environments: registry, TenantId: tenant.id,
+                HiveId: TenantAdminServer.FirstHiveOf(directory).id, Client: inCluster?.client,
+            }),
         })
+        const selfApply = inCluster === undefined ? undefined : ConsoleConfiguration.SelfOf(inCluster.client, tenant.id, TenantAdminServer.FirstHiveOf(directory).id)
         const monitor = cfg.probeMs > 0
             ? new TenantHealthMonitor(directory, new HiveHealthProducer(service, orchestrators, placement), plane.events, cfg.probeMs, cfg.probeTimeoutMs, service)
             : undefined
@@ -383,7 +394,7 @@ export class TenantAdminServer
         // and relays (the host has attached both to plane.principals above).
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
-        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db }
+        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply }
     }
 
     /**
@@ -394,6 +405,10 @@ export class TenantAdminServer
     {
         const composition = await this.Compose(env, undefined, log, database)
         const cfg = composition.config
+        // An apply the console made to itself ended with its restart: complete it by what this console runs, before any
+        // new apply can begin.
+        await composition.selfApply?.Settle(await composition.database.Configuration(), composition.directory.Tenant.id)
+            .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
         try
         {
             await composition.host.Listen(cfg.port, cfg.bind)
@@ -483,6 +498,19 @@ export class TenantAdminServer
         const value = env[name]
         return value === undefined || value === TenantAdminServer.EmptyString ? undefined : value
     }
+
+    /** A secret setting: its `_FILE` (where the start step writes a configured secret) or the plain variable. */
+    private static RequiredSecret(env: NodeJS.ProcessEnv, name: string): string
+    {
+        const value = SecretVariable.Read(env, name)
+        if (value === undefined)
+        {
+            throw new Error(TenantAdminServer.MissingEnvPrefix + name)
+        }
+        return value
+    }
+
+    private static readonly SettleFailed = 'settling the console\'s own configuration apply failed: '
 
     private static Required(env: NodeJS.ProcessEnv, name: string): string
     {

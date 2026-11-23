@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { RelayCommand } from '@pragmatic-tech-ai/mural/runtime'
 import { ApiError } from '../../../tenant-api-client.js'
-import { ConfigurationApplyOutcome, ConfigurationChangeKind } from '../../../tenant-types.js'
+import { ConfigurationApplyDetails, ConfigurationApplyOutcome, ConfigurationChangeKind } from '../../../tenant-types.js'
 import { PageState } from '../../../shell/tenant-page-view-model.js'
 import { FakeTenantApi, TenantTestHost, TestRail, Tick } from '../../../shell/tests/tenant-test-fixtures.js'
 import { ContentHostService } from '@pragmatic-tech-ai/mural/framework/shell/services/content-host-service.js'
@@ -249,6 +249,52 @@ describe('ComponentConfigurationPageViewModel', () =>
         page.ApplyCommand.Execute()
         await Tick.Settle()
         assert.equal(page.NoticeText, 'Applying version 2 to production failed: The deployment did not roll out.')
+    })
+
+    it('shows Reverted for a failed apply whose new pods never became ready', async () =>
+    {
+        const fx = new ConfigFixture()
+        fx.Api.ApplyOutcome = ConfigurationApplyOutcome.Failed
+        fx.Api.ApplyDetail = ConfigurationApplyDetails.RolloutNotReady
+        const page = await fx.Component()
+        page.SelectedTarget = page.TargetOptions.ToArray()[0]
+        page.ApplyCommand.Execute()
+        await Tick.Settle()
+        assert.equal(page.NoticeText, 'Version 2 did not become ready on production: the previous configuration is running again.')
+        const [row] = page.ApplyRows.ToArray()
+        assert.deepEqual([row.OutcomeText, row.IsReverted, row.IsFailed], ['Reverted', true, true])
+        assert.match(row.DetailText, /previous configuration is running again/)
+        assert.deepEqual(page.TargetRows.ToArray().map(r => r.AppliedText), ['Nothing applied', 'Nothing applied'])
+    })
+
+    it('shows the apply in progress and offers no second apply meanwhile', async () =>
+    {
+        const fx = new ConfigFixture()
+        const page = await fx.Component()
+        page.SelectedTarget = page.TargetOptions.ToArray()[0]
+        page.ApplyCommand.Execute()
+        assert.equal(page.IsApplying, true)
+        assert.match(page.ApplyingText, /^Applying version 2 to production: waiting up to two minutes for the new pods/)
+        assert.equal(page.ApplyCommand.CanExecute(undefined), false)
+        await Tick.Settle()
+        assert.deepEqual([page.IsApplying, page.ApplyingText], [false, ''])
+    })
+
+    it('writes a secret value and keeps only its reference', async () =>
+    {
+        const fx = new ConfigFixture()
+        const page = await fx.Component()
+        assert.equal(page.SecretCommand.CanExecute(undefined), false)
+        page.SecretName = 'graph-db'
+        page.SecretValue = 'hunter2'
+        assert.equal(page.SecretCommand.CanExecute(undefined), false, 'a secret is written for one chosen target')
+        page.SelectedTarget = page.TargetOptions.ToArray()[1]
+        page.SecretCommand.Execute()
+        await Tick.Settle()
+        assert.equal(fx.Api.Secrets.get('graph/staging/graph-db'), 'hunter2')
+        assert.deepEqual(fx.Api.Calls.find(c => c[0] === 'PutConfigurationSecret'), ['PutConfigurationSecret', 'graph', 'staging', 'graph-db'])
+        assert.equal(page.SecretValue, '', 'the value leaves the page once written')
+        assert.equal(page.NoticeText, 'Saved secret graph-db; refer to it as secret:file/graph-db.')
     })
 
     it('offers save and apply only with the settings permission (the tenant admin role); reads stay open', async () =>
