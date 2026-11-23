@@ -1,13 +1,17 @@
 import { CanonicalJson, ConfigurationValidator, type ComponentDescriptor, type ConfigurationError } from '@pragmatic-tech-ai/pragmatic-component'
 import {
-    AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEntries, AppliedConfigurationKeys, ConfigurationHeadMovedError, ConfigurationPreparationRefusal,
-    ConfigurationPreparationStatus, ConfigurationSaveRequest, ConfigurationScope, type ConfigurationVersion, type IAppliedConfigMap, type IConfigurationRepository,
+    AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEntries, AppliedConfigurationKeys, AppliedDocumentCarryOver, ConfigurationHeadMovedError,
+    ConfigurationPreparationRefusal, ConfigurationPreparationStatus, ConfigurationSaveRequest, ConfigurationScope, type ApplyTarget, type ConfigurationVersion,
+    type IAppliedConfigMap, type IConfigurationRepository,
 } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import {
-    ConfigurationPreparationOutcome, type ConfigurationPreparationDto, type ConfigurationTarget, type IComponentDescriptorSource, type IConfigurationPreparationSource,
+    ConfigurationPreparationOutcome, ConfigurationTarget, type ConfigurationPreparationDto, type IComponentDescriptorSource, type IConfigurationPreparationSource,
     type IConfigurationTargetSource,
 } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { ComponentVersionOrder } from './component-version-order.js'
+import { ConfigMapWriteLock } from './config-map-write-lock.js'
+import { ConsoleSelfApply } from './console-self-apply.js'
 import { KubeConfigurationApplier } from './kube-configuration-applier.js'
 
 /** What preparing one target came to. */
@@ -19,11 +23,13 @@ export enum PreparationResult
     Refused = 'refused',
     /** The applied configuration was validated for the release's descriptor already. */
     Current = 'current',
+    /** The applied configuration is for a later component version than the release the console runs: not prepared back. */
+    Ahead = 'ahead',
     /** No configuration is applied there: the component starts from its environment, nothing to prepare. */
     Unconfigured = 'unconfigured',
-    /** Not this console's to prepare (another realm), or not readable as an applied configuration. */
+    /** Not this console's to prepare (another realm or component), or not readable as an applied configuration. */
     Skipped = 'skipped',
-    /** The cluster or the repository refused; tried again at the next start. */
+    /** The cluster or the repository refused; tried again at the next start or apply. */
     Failed = 'failed',
 }
 
@@ -39,37 +45,53 @@ export class PreparationReport
     }
 }
 
-type ConfigMapShape = { metadata?: { name?: unknown; namespace?: unknown; labels?: Record<string, unknown>; annotations?: Record<string, unknown> }; data?: Record<string, unknown> }
+/** After an apply or a revert, the target is prepared again from the file now applied (KubeConfigurationApplier). */
+export interface IApplyPreparation
+{
+    PrepareApplied(applied: AppliedConfiguration, target: ApplyTarget): Promise<PreparationReport | undefined>
+}
+
+type ConfigMapShape = { metadata?: { name?: unknown; namespace?: unknown; resourceVersion?: unknown; labels?: Record<string, unknown>; annotations?: Record<string, unknown> }; data?: Record<string, unknown> }
 
 /**
- * Prepares every applied configuration for the descriptors of the release this console runs (R2, R5): at start, for each
- * component it configures and each target of it, the document applied there (`configuration.json` of
- * `pragmatic-config-<component>`) is re-validated against the release's descriptor of that component. The document
- * re-validated is the one the repository holds for the applied version (as authored), or, when the repository does not
- * hold it (a configuration applied by hand), the applied document itself, which is then adopted.
+ * Prepares every applied configuration for the descriptors of the release this console runs (R2, R5): at start, and
+ * again after every apply or revert, for each component it configures and each target of it, the document applied there
+ * (`configuration.json` of `pragmatic-config-<component>`) is re-validated against the release's descriptor of that
+ * component, when that release's component version is later than the one the document was validated for.
  *
- * - It validates: it is saved as the scope's next version, validated for the new descriptor (unless the head already is
- *   that document for that descriptor), and its applied form is written beside the applied file as the prepared entry
- *   `configuration.json.sha256-<hex>`, marked prepared (`pragmatic-tech.ai/prepared-digests`). The applied file, the
- *   ConfigMap's hash annotation and the Deployment are not touched, so nothing rolls: the running pods keep their file
- *   and the new release's pods read their entry.
- * - It does not: the refusal (the settings that must change, the rules they break, never a value) is recorded on the
- *   ConfigMap (`pragmatic-tech.ai/preparation-refused`), nothing is saved and no entry written.
+ * The document re-validated is the version the repository holds for the applied version number, as authored, when it is
+ * the content applied there (its applied form hashes the same, or the target's last apply was that version); otherwise
+ * the applied document itself (a configuration applied by hand), adopted, with the defaults the descriptor it was
+ * validated for filled in left behind when that descriptor is known (AppliedDocumentCarryOver).
  *
- * Whoever rolls a component onto the new release (the platform's installer) reads that status and waits; it never writes
- * a configuration (configuration stays tenant-owned). Writes go under the configuration field manager, so a later apply
- * keeps what was prepared (KubeConfigurationApplier). One target failing never stops the others.
+ * - It validates: it is saved as the scope's next version (unless the head already is that document for that
+ *   descriptor) and its applied form is written beside the applied file as the prepared entry
+ *   `configuration.json.sha256-<hex>`, marked prepared. The applied file, its hash annotation and the Deployment are not
+ *   touched, so nothing rolls: the running pods keep their file and the release's pods read their entry.
+ * - It does not: the refusal (the settings that must change and the rules they break, never a value) is recorded, no
+ *   entry is written and nothing saved.
+ *
+ * The status names the applied file it was derived from (`pragmatic-tech.ai/prepared-from`), so an apply since makes it
+ * stale until this runs again; entries for descriptors that are neither the release's nor the one the target runs are
+ * dropped. Whoever rolls a component onto the release (the platform's installer) reads the status and waits; it never
+ * writes a configuration (configuration stays tenant-owned). Writes go under the configuration field manager, serialized
+ * with the applier's (ConfigMapWriteLock) and conditioned on the resourceVersion read, and carry only the members the
+ * console owns. One target failing never stops the others.
  */
-export class ConfigurationPreparer implements IConfigurationPreparationSource
+export class ConfigurationPreparer implements IConfigurationPreparationSource, IApplyPreparation
 {
     /** The author of a version the console saves itself when preparing (a realm subject cannot be named here). */
     public static readonly Author = 'pragmatic-tenant-admin'
     private static readonly ConfigMapType = { apiVersion: 'v1', kind: 'ConfigMap' }
-    private static readonly LastApplied = 'kubectl.kubernetes.io/last-applied-configuration'
     private static readonly OptionsPointer = '/options/'
     private static readonly PointerSeparator = '/'
+    private static readonly EscapedSlash = /~1/g
+    private static readonly EscapedTilde = /~0/g
+    private static readonly Slash = '/'
+    private static readonly Tilde = '~'
     private static readonly SettingSeparator = '.'
     private static readonly DocumentName = '(document)'
+    private static readonly NoText = ''
     private static readonly ErrorSeparator = '; '
     private static readonly CommentPrefix = 'Prepared for '
     private static readonly CommentFrom = ' from applied version '
@@ -85,12 +107,21 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
     private static readonly Space = ' '
     private static readonly SettingsSeparator = ', '
     private static readonly SaveAttempts = 2
+    /** The members of the object the console writes (the applier's set): nothing another writer put there is taken over. */
+    private static readonly OwnedData: readonly string[] = [AppliedConfigurationKeys.FileName, ConsoleSelfApply.PreviousKey, ConsoleSelfApply.PreviousAnnotationsKey]
+    private static readonly OwnedAnnotations: readonly string[] = [
+        AppliedConfigurationKeys.VersionAnnotation, AppliedConfigurationKeys.DigestAnnotation, AppliedConfigurationKeys.HashAnnotation, AppliedConfigurationKeys.RealmAnnotation,
+        AppliedConfigurationKeys.PreparedDigestsAnnotation, AppliedConfigurationKeys.PreparationRefusedAnnotation, AppliedConfigurationKeys.PreparedFromAnnotation,
+        ConsoleSelfApply.PreviousHashAnnotation,
+    ]
+    private static readonly OwnedLabels: readonly string[] = [AppliedConfigurationKeys.ComponentLabel, AppliedConfigurationKeys.ManagedByLabel]
 
     public constructor(
         private readonly client: KubeApiClient,
         private readonly repository: IConfigurationRepository,
         private readonly descriptors: IComponentDescriptorSource,
         private readonly targets: IConfigurationTargetSource,
+        private readonly lock: ConfigMapWriteLock = new ConfigMapWriteLock(),
         private readonly log: (line: string) => void = () => undefined,
     )
     {
@@ -122,16 +153,26 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
         return out
     }
 
-    /** What was recorded for `component` at each of `targets`: one row per prepared or refused descriptor. */
+    /** Prepares one target again from the file just applied (or put back) there. */
+    public async PrepareApplied(applied: AppliedConfiguration, target: ApplyTarget): Promise<PreparationReport | undefined>
+    {
+        const descriptor = this.descriptors.Current(applied.Component)
+        if (descriptor === undefined) return undefined
+        return await this.PrepareOne(applied.Realm, applied.Component, descriptor, new ConfigurationTarget(target.Namespace, target, undefined, undefined))
+    }
+
+    /** What is recorded for `component` at each of `targets` for the file applied there now: one row per prepared or
+     *  refused descriptor, except the one the target already runs. */
     public async For(component: string, targets: readonly ConfigurationTarget[]): Promise<readonly ConfigurationPreparationDto[]>
     {
+        const P = ConfigurationPreparer
         const out: ConfigurationPreparationDto[] = []
         for (const target of targets)
         {
             let map: ConfigMapShape | undefined
             try
             {
-                map = await this.client.Get(ConfigurationPreparer.PathOf(component, target)) as ConfigMapShape | undefined
+                map = await this.client.Get(P.PathOf(component, target)) as ConfigMapShape | undefined
             }
             catch
             {
@@ -139,12 +180,13 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
             }
             if (map === undefined) continue
             const status = ConfigurationPreparationStatus.Of(map.metadata?.annotations)
-            const entries = ConfigurationPreparer.EntriesOf(map)
-            for (const digest of status.Prepared)
+            if (!status.Holds(P.HashOf(map))) continue
+            const entries = P.EntriesOf(map)
+            for (const digest of status.Prepared.filter(d => d !== target.DescriptorDigest))
             {
-                out.push({ environment: target.Name, componentVersion: entries.get(digest)?.ComponentVersion ?? '', descriptorDigest: digest, outcome: ConfigurationPreparationOutcome.Prepared, settings: [], reason: '' })
+                out.push({ environment: target.Name, componentVersion: entries.get(digest)?.ComponentVersion ?? P.NoText, descriptorDigest: digest, outcome: ConfigurationPreparationOutcome.Prepared, settings: [], reason: P.NoText })
             }
-            for (const refusal of status.Refusals)
+            for (const refusal of status.Refusals.filter(r => r.DescriptorDigest !== target.DescriptorDigest))
             {
                 out.push({ environment: target.Name, componentVersion: refusal.ComponentVersion, descriptorDigest: refusal.DescriptorDigest, outcome: ConfigurationPreparationOutcome.Refused, settings: [...refusal.Settings], reason: refusal.Reason })
             }
@@ -154,9 +196,10 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
 
     private async PrepareOne(tenantId: string, component: string, descriptor: ComponentDescriptor, target: ConfigurationTarget): Promise<PreparationReport>
     {
+        const path = ConfigurationPreparer.PathOf(component, target)
         try
         {
-            return await this.Prepare(tenantId, component, descriptor, target)
+            return await this.lock.Run(path, () => this.Prepare(tenantId, component, descriptor, target, path))
         }
         catch (error)
         {
@@ -165,10 +208,9 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
         }
     }
 
-    private async Prepare(tenantId: string, component: string, descriptor: ComponentDescriptor, target: ConfigurationTarget): Promise<PreparationReport>
+    private async Prepare(tenantId: string, component: string, descriptor: ComponentDescriptor, target: ConfigurationTarget, path: string): Promise<PreparationReport>
     {
         const P = ConfigurationPreparer
-        const path = P.PathOf(component, target)
         const map = await this.client.Get(path) as ConfigMapShape | undefined
         if (typeof map?.data?.[AppliedConfigurationKeys.FileName] !== 'string') return new PreparationReport(component, target, PreparationResult.Unconfigured)
         let applied: AppliedConfiguration
@@ -183,39 +225,80 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
         if (applied.Realm !== tenantId || applied.Component !== component) return new PreparationReport(component, target, PreparationResult.Skipped)
         const digest = descriptor.ContentDigest()
         if (applied.DescriptorDigest === digest) return new PreparationReport(component, target, PreparationResult.Current)
-        const writable = P.Writable(map, component, target)
-        const status = ConfigurationPreparationStatus.Of(writable.metadata.annotations)
-        const existing = P.EntriesOf(map).get(digest)
-        if (existing !== undefined && existing.Realm === applied.Realm && new ConfigurationValidator(descriptor).Validate(existing.Document).Valid)
+        if (!ComponentVersionOrder.IsNewer(descriptor.Version, applied.ComponentVersion)) return new PreparationReport(component, target, PreparationResult.Ahead)
+        const entries = P.EntriesOf(map)
+        // What was prepared from another applied file is stale; entries for descriptors nobody runs or rolls to go.
+        const status = ConfigurationPreparationStatus.Of(map.metadata?.annotations).DerivedFrom(applied.ContentHash())
+        const kept = new Set([digest, target.DescriptorDigest])
+        const obsolete = [...entries.keys()].filter(d => !kept.has(d))
+        const base = AppliedConfigurationEntries.Without(P.Writable(map, component, target, status), obsolete)
+        const existing = entries.get(digest)
+        if (status.IsPrepared(digest) && existing !== undefined && existing.Realm === applied.Realm && existing.Component === component && new ConfigurationValidator(descriptor).Validate(existing.Document).Valid)
         {
-            if (!status.IsPrepared(digest)) await this.Write(path, AppliedConfigurationEntries.With(writable, existing))
+            if (obsolete.length > 0) await this.Write(path, base)
             return new PreparationReport(component, target, PreparationResult.Prepared)
         }
+        const recorded = status.RefusalFor(digest)
+        if (recorded !== undefined && obsolete.length === 0) return new PreparationReport(component, target, PreparationResult.Refused, recorded.Settings)
         const scope = new ConfigurationScope(tenantId, component)
-        const source = await this.SourceOf(scope, applied)
+        const source = await this.SourceOf(scope, applied, descriptor, target)
         const validation = new ConfigurationValidator(descriptor).Validate(source)
         if (!validation.Valid)
         {
             const settings = P.SettingsOf(validation.Errors)
             const refusal = new ConfigurationPreparationRefusal(digest, descriptor.Version, settings, validation.Errors.map(e => e.toString()).join(P.ErrorSeparator))
-            const refused = AppliedConfigurationEntries.Without(writable, [digest])
+            const refused = AppliedConfigurationEntries.Without(base, [digest])
             refused.metadata.annotations = ConfigurationPreparationStatus.Of(refused.metadata.annotations).WithRefusal(refusal).Over(refused.metadata.annotations)
             await this.Write(path, refused)
             this.Log(component, target, P.LogRefused + descriptor.Version + P.LogChange + settings.join(P.SettingsSeparator))
             return new PreparationReport(component, target, PreparationResult.Refused, settings)
         }
         const saved = await this.SaveFor(scope, source, descriptor, applied)
-        const entry = AppliedConfiguration.From(saved, descriptor)
-        await this.Write(path, AppliedConfigurationEntries.With(writable, entry))
+        await this.Write(path, AppliedConfigurationEntries.With(base, AppliedConfiguration.From(saved, descriptor)))
         this.Log(component, target, P.LogPrepared + descriptor.Version + P.LogAsVersion + String(saved.Number))
         return new PreparationReport(component, target, PreparationResult.Prepared)
     }
 
-    // The applied version as authored when the repository holds it (same number, same descriptor), else the applied document.
-    private async SourceOf(scope: ConfigurationScope, applied: AppliedConfiguration): Promise<unknown>
+    // The applied version as authored when the repository holds that content; else the applied document, its inherited
+    // defaults left behind when the descriptor it was validated for is known.
+    private async SourceOf(scope: ConfigurationScope, applied: AppliedConfiguration, descriptor: ComponentDescriptor, target: ConfigurationTarget): Promise<unknown>
     {
+        const inherited = await this.InheritedOf(applied)
         const held = await this.repository.Version(scope, applied.Version)
-        return held !== null && held.DescriptorDigest === applied.DescriptorDigest ? held.Document : applied.Document
+        if (held !== null && held.DescriptorDigest === applied.DescriptorDigest && await this.Holds(held, applied, inherited, scope, target)) return held.Document
+        return inherited === undefined ? applied.Document : AppliedDocumentCarryOver.Carry(applied.Document, descriptor, inherited).Document
+    }
+
+    // Whether the repository's version is what is applied: its applied form hashes the same (descriptor known), or the
+    // target's last successful apply was that version.
+    private async Holds(held: ConfigurationVersion, applied: AppliedConfiguration, inherited: ComponentDescriptor | undefined, scope: ConfigurationScope, target: ConfigurationTarget): Promise<boolean>
+    {
+        if (inherited !== undefined)
+        {
+            try
+            {
+                return AppliedConfiguration.From(held, inherited).ContentHash() === applied.ContentHash()
+            }
+            catch
+            {
+                return false
+            }
+        }
+        return (await this.repository.Applied(scope, target.Target))?.Version === applied.Version
+    }
+
+    // The descriptor the applied file was validated for, when the console can read it (its release, or an adopted one).
+    private async InheritedOf(applied: AppliedConfiguration): Promise<ComponentDescriptor | undefined>
+    {
+        try
+        {
+            const descriptor = await this.descriptors.For(applied.Component, applied.ComponentVersion)
+            return descriptor !== undefined && descriptor.ContentDigest() === applied.DescriptorDigest ? descriptor : undefined
+        }
+        catch
+        {
+            return undefined
+        }
     }
 
     // The head when it already is this document for this descriptor (a start that saved but could not write), else a new version.
@@ -226,7 +309,7 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
         for (let attempt = 1; ; attempt += 1)
         {
             const head = await this.repository.Head(scope)
-            if (head !== null && head.DescriptorDigest === descriptor.ContentDigest() && CanonicalJson.Stringify(head.Document) === CanonicalJson.Stringify(document as never)) return head
+            if (head !== null && head.DescriptorDigest === descriptor.ContentDigest() && CanonicalJson.Stringify(head.Document) === CanonicalJson.Stringify(document)) return head
             try
             {
                 return await this.repository.Save(new ConfigurationSaveRequest(scope, head === null ? 0 : head.Number, document, descriptor, P.Author, comment))
@@ -246,7 +329,7 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
     private Log(component: string, target: ConfigurationTarget | undefined, text: string): void
     {
         const P = ConfigurationPreparer
-        this.log(P.LogPrefix + component + (target === undefined ? '' : P.LogOn + target.Name) + text)
+        this.log(P.LogPrefix + component + (target === undefined ? P.NoText : P.LogOn + target.Name) + text)
     }
 
     private static PathOf(component: string, target: ConfigurationTarget): string
@@ -254,31 +337,33 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
         return KubeResourceCatalog.PathOf(ConfigurationPreparer.ConfigMapType, target.Target.Namespace, AppliedConfigurationKeys.ObjectNamePrefix + component)
     }
 
-    // The object as this console writes it back: identity, labels, annotations (kubectl's record left to kubectl) and data.
-    private static Writable(map: ConfigMapShape, component: string, target: ConfigurationTarget): IAppliedConfigMap
+    private static HashOf(map: ConfigMapShape): string | undefined
+    {
+        const hash = map.metadata?.annotations?.[AppliedConfigurationKeys.HashAnnotation]
+        return typeof hash === 'string' ? hash : undefined
+    }
+
+    // The object as this console writes it back: only the members it owns (the applier's set and the entries), the status
+    // given, and the resourceVersion read, so a write over a change made since is refused (409).
+    private static Writable(map: ConfigMapShape, component: string, target: ConfigurationTarget, status: ConfigurationPreparationStatus): IAppliedConfigMap
     {
         const P = ConfigurationPreparer
-        const annotations: Record<string, string> = {}
-        for (const [key, value] of Object.entries(map.metadata?.annotations ?? {}))
+        const data = P.Owned(map.data, key => P.OwnedData.includes(key) || AppliedConfigurationEntries.DigestOfKey(key) !== undefined)
+        const annotations = status.Over(P.Owned(map.metadata?.annotations, key => P.OwnedAnnotations.includes(key)))
+        const labels = P.Owned(map.metadata?.labels, key => P.OwnedLabels.includes(key))
+        const metadata: IAppliedConfigMap['metadata'] & { resourceVersion?: string } = { name: AppliedConfigurationKeys.ObjectNamePrefix + component, namespace: target.Target.Namespace, labels, annotations }
+        if (typeof map.metadata?.resourceVersion === 'string') metadata.resourceVersion = map.metadata.resourceVersion
+        return { apiVersion: P.ConfigMapType.apiVersion, kind: P.ConfigMapType.kind, metadata, data }
+    }
+
+    private static Owned(values: Record<string, unknown> | undefined, owned: (key: string) => boolean): Record<string, string>
+    {
+        const out: Record<string, string> = {}
+        for (const [key, value] of Object.entries(values ?? {}))
         {
-            if (key !== P.LastApplied && typeof value === 'string') annotations[key] = value
+            if (owned(key) && typeof value === 'string') out[key] = value
         }
-        const labels: Record<string, string> = {}
-        for (const [key, value] of Object.entries(map.metadata?.labels ?? {}))
-        {
-            if (typeof value === 'string') labels[key] = value
-        }
-        const data: Record<string, string> = {}
-        for (const [key, value] of Object.entries(map.data ?? {}))
-        {
-            if (typeof value === 'string') data[key] = value
-        }
-        return {
-            apiVersion: P.ConfigMapType.apiVersion,
-            kind: P.ConfigMapType.kind,
-            metadata: { name: AppliedConfigurationKeys.ObjectNamePrefix + component, namespace: target.Target.Namespace, labels, annotations },
-            data,
-        }
+        return out
     }
 
     // Entries that do not read count as none: preparing writes a fresh one.
@@ -298,7 +383,12 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource
     private static SettingsOf(errors: readonly ConfigurationError[]): string[]
     {
         const P = ConfigurationPreparer
-        const names = errors.map(e => e.Path.startsWith(P.OptionsPointer) ? e.Path.slice(P.OptionsPointer.length).split(P.PointerSeparator).join(P.SettingSeparator) : e.Path === '' ? P.DocumentName : e.Path)
+        const names = errors.map(e =>
+        {
+            if (e.Path === P.NoText) return P.DocumentName
+            if (!e.Path.startsWith(P.OptionsPointer)) return e.Path
+            return e.Path.slice(P.OptionsPointer.length).split(P.PointerSeparator).map(s => s.replace(P.EscapedSlash, P.Slash).replace(P.EscapedTilde, P.Tilde)).join(P.SettingSeparator)
+        })
         return [...new Set(names)]
     }
 

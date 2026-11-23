@@ -4,6 +4,7 @@ import { AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEn
 import { KubeApiClient, KubeContentType, KubeMethod, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationApplyResult } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../../tenant-admin-component.js'
+import { ConfigMapWriteLock } from '../config-map-write-lock.js'
 import { KubeConfigurationApplier } from '../kube-configuration-applier.js'
 import { RolloutState, RolloutWatch } from '../rollout-watch.js'
 import { ConfigurationFixture as F } from './configuration-fixture.js'
@@ -184,6 +185,42 @@ describe('RolloutWatch', () =>
 
 describe('KubeConfigurationApplier and prepared entries', () =>
 {
+    it('after an apply, and after a revert, the target is prepared again from the file now there', async () =>
+    {
+        const W = ApplyWorld
+        const prepared: { version: number; namespace: string }[] = []
+        const preparation = { PrepareApplied: async (applied: AppliedConfiguration, target: ApplyTarget) => { prepared.push({ version: applied.Version, namespace: target.Namespace }); return undefined } }
+        const cluster = W.Cluster(W.Applied(1, 7100))
+        const client = new KubeApiClient(cluster)
+        const applier = new KubeConfigurationApplier(client, new RolloutWatch(client, new FakeClock()), KubeConfigurationApplier.RolloutTimeoutMs, undefined, new ConfigMapWriteLock(), preparation)
+        assert.equal(await applier.Apply(W.Applied(2, 7200), W.Target()), ConfigurationApplyResult.Applied)
+        const bad = W.Applied(3, 1)
+        cluster.Readies = template => template.metadata?.annotations?.[W.Hash] !== bad.ContentHash()
+        assert.equal(await applier.Apply(bad, W.Target()), ConfigurationApplyResult.Reverted)
+        assert.deepEqual(prepared, [{ version: 2, namespace: W.Namespace }, { version: 2, namespace: W.Namespace }], 'the reverted-to file is prepared, never the refused one')
+    })
+
+    it('a revert keeps the entries prepared while the roll was watched', async () =>
+    {
+        const W = ApplyWorld
+        const previous = W.Applied(1, 7100)
+        const cluster = W.Cluster(previous)
+        const bad = W.Applied(2, 1)
+        const lateDigest = `sha256:${'7'.repeat(64)}`
+        const late = new AppliedConfiguration(F.Tenant, previous.Component, 3, '9.9.9', lateDigest, { options: {} })
+        // While the new pod fails to ready, the preparer writes an entry (as it does after another apply).
+        cluster.Readies = template =>
+        {
+            const map = cluster.Objects.get(W.ConfigMapPath) as Obj
+            if (map !== undefined && !(AppliedConfigurationEntries.KeyOf(lateDigest) in map.data)) cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(map as never, late) as Obj)
+            return template.metadata?.annotations?.[W.Hash] !== bad.ContentHash()
+        }
+        assert.equal(await W.Applier(cluster).Apply(bad, W.Target()), ConfigurationApplyResult.Reverted)
+        const restored = cluster.Objects.get(W.ConfigMapPath) as Obj
+        assert.equal(W.PortOf(cluster), 7100)
+        assert.deepEqual([...AppliedConfigurationEntries.Prepared(restored).keys()], [lateDigest])
+    })
+
     it('an apply keeps the entries prepared for other descriptors and drops the one for its own descriptor', async () =>
     {
         const W = ApplyWorld

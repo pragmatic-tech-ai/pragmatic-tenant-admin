@@ -11,6 +11,7 @@ import { ReleaseDescriptorCatalogue, type IReleaseDescriptorReader } from './rel
 import { RolloutWatch } from './rollout-watch.js'
 import { ConsoleSelfApply } from './console-self-apply.js'
 import { ConfigurationPreparer } from './configuration-preparer.js'
+import { ConfigMapWriteLock } from './config-map-write-lock.js'
 
 /** The environment records the console's environment namespaces are read from. */
 export interface IEnvironmentList
@@ -150,8 +151,10 @@ export class ConsoleConfiguration
             return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, new NoConfigurationTargets(), new UnavailableConfigurationApplier(), new UnavailableComponentSecretWriter()), undefined)
         }
         const targets = new LabelConfigurationTargets(parts.Client, new ConsoleConfiguredNamespaces(parts.HiveId, parts.TenantId, parts.Environments), new ImageComponentDigests(), catalogue)
-        const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, C.SelfOf(parts.Client, parts.TenantId, parts.HiveId))
-        const preparer = new ConfigurationPreparer(parts.Client, parts.Repository, catalogue, targets, log)
+        // One lock for every write of a configuration object: the applier's and the preparer's never interleave.
+        const lock = new ConfigMapWriteLock()
+        const preparer = new ConfigurationPreparer(parts.Client, parts.Repository, catalogue, targets, lock, log)
+        const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, C.SelfOf(parts.Client, parts.TenantId, parts.HiveId), lock, preparer)
         return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, targets, applier, new ComponentSecretWriter(parts.Client), preparer), preparer)
     }
 

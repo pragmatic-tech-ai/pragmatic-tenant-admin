@@ -283,6 +283,17 @@ describe('ConsoleSelfApply and prepared entries', () =>
             const env: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path }
             const port = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, new ExitRecorder())
             assert.equal(port, '7443', 'the re-validated document was overlaid')
+            // A retired setting is left behind and said; a document that does not carry over is ignored, not fatal.
+            await writeFile(path, new AppliedConfiguration('acme', own.Name, 4, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 7443, retired: 'x' } } }).ToCanonicalJson())
+            const said = new ExitRecorder()
+            assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, { PRAGMATIC_CONFIGURATION_FILE: path }, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, said), '7443')
+            assert.match(said.Text, /leaving behind .*core\.retired/)
+            await writeFile(path, new AppliedConfiguration('acme', own.Name, 5, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 'not-a-port' } } }).ToCanonicalJson())
+            const ignored = new ExitRecorder()
+            const env2: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path, PRAGMATIC_TENANT_ADMIN_PORT: '7100' }
+            assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env2, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, ignored), '7100')
+            assert.equal(ignored.Code, undefined, 'the console still starts')
+            assert.match(ignored.Text, /started without its applied configuration/)
         }
         finally
         {

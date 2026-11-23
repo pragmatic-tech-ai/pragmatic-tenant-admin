@@ -275,12 +275,11 @@ describe('ComponentConfigurationPageViewModel', () =>
             { environment: 'staging', componentVersion: '0.2.4', descriptorDigest: 'sha256:b', outcome: ConfigurationPreparationOutcome.Refused, settings: ['database.poolSize'], reason: '/options/database/poolSize is not a setting of this option' },
         ])
         const page = await fx.Component()
-        assert.equal(page.HasPreparations, true)
-        assert.equal(page.PreparationText, 'Ready for 0.2.4 on production: a version validated for it is prepared beside the running one.\n'
-            + 'Not ready for 0.2.4 on staging: change database.poolSize before the platform rolls it out (/options/database/poolSize is not a setting of this option).')
+        assert.deepEqual([page.HasReady, page.HasRefused], [true, true])
+        assert.equal(page.ReadyText, 'Ready for 0.2.4 on production: a version validated for it is prepared beside the running one.')
+        assert.equal(page.RefusedText, 'Not ready for 0.2.4 on staging: change database.poolSize before the platform rolls it out (/options/database/poolSize is not a setting of this option).')
         const plain = await new ConfigFixture().Component()
-        assert.equal(plain.HasPreparations, false)
-        assert.equal(plain.PreparationText, '')
+        assert.deepEqual([plain.HasReady, plain.HasRefused, plain.ReadyText, plain.RefusedText], [false, false, '', ''])
     })
 
     it('shows the apply in progress and offers no second apply meanwhile', async () =>

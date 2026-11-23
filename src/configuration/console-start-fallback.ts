@@ -1,5 +1,5 @@
 import type { ComponentDeclaration } from '@pragmatic-tech-ai/pragmatic-component'
-import { ApplyTarget, ComponentStartConfiguration, ConfigurationStartError, type IStartProcess } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ApplyTarget, ComponentStartConfiguration, ConfigurationStartError, type ComponentStartReport, type IStartProcess } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { HttpsKubeTransport, InClusterServiceAccount, KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { K8sManifestBuilder, TenantAdminEnv } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../tenant-admin-component.js'
@@ -21,6 +21,9 @@ export interface IConsoleRevert
 export class ConsoleStartFallback
 {
     public static readonly RevertedNote = 'the previous configuration of the console was put back'
+    public static readonly IgnoredNote = 'started without its applied configuration (validated for another console version, and it does not carry over): '
+    public static readonly DroppedNote = 'started on its applied configuration of another console version, leaving behind the settings this version no longer has: '
+    private static readonly NameSeparator = ', '
     /** The revert reads and writes by namespace and name only; the hive is not known before the console starts. */
     private static readonly LocalHive = 'local'
     private static readonly NoNote = ''
@@ -34,7 +37,8 @@ export class ConsoleStartFallback
         try
         {
             // The console alone re-validates a configuration of its previous descriptor (it prepares everyone's entries, so nobody prepares its own).
-            await ComponentStartConfiguration.Apply({ Declaration: declaration, Env: env, Revalidate: true })
+            const report = await ComponentStartConfiguration.Apply({ Declaration: declaration, Env: env, Revalidate: true })
+            F.Tell(declaration, report, process)
             return read(env)
         }
         catch (error)
@@ -56,6 +60,14 @@ export class ConsoleStartFallback
             }
             throw error
         }
+    }
+
+    // A configuration of the console's previous version carried over or ignored is said on stderr (names only, never values).
+    private static Tell(declaration: ComponentDeclaration, report: ComponentStartReport, process: IStartProcess): void
+    {
+        const F = ConsoleStartFallback
+        if (report.Ignored !== undefined) process.stderr.write(declaration.name + F.ReasonSeparator + F.IgnoredNote + report.Ignored + F.LineEnd)
+        if (report.Dropped.length > 0) process.stderr.write(declaration.name + F.ReasonSeparator + F.DroppedNote + report.Dropped.join(F.NameSeparator) + F.LineEnd)
     }
 
     /** The revert of the console's own Deployment, named by PRAGMATIC_TENANT_ADMIN_DEPLOYMENT (its manifest renders it). */

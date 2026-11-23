@@ -25,8 +25,10 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private static readonly HasVersionsProperty = 'HasVersions'
     private static readonly HasTargetsProperty = 'HasTargets'
     private static readonly HasAppliesProperty = 'HasApplies'
-    private static readonly PreparationTextProperty = 'PreparationText'
-    private static readonly HasPreparationsProperty = 'HasPreparations'
+    private static readonly ReadyTextProperty = 'ReadyText'
+    private static readonly HasReadyProperty = 'HasReady'
+    private static readonly RefusedTextProperty = 'RefusedText'
+    private static readonly HasRefusedProperty = 'HasRefused'
     private static readonly PreparedPrefix = 'Ready for '
     private static readonly RefusedPrefix = 'Not ready for '
     private static readonly PreparationOn = ' on '
@@ -210,16 +212,32 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         return this.applyRows.Count > 0
     }
 
-    // How the configuration stands for the descriptors of the release the console runs, one line per target and descriptor.
-    public get PreparationText(): string
+    // Where the configuration is ready for the release the console runs, one line per target and descriptor.
+    public get ReadyText(): string
     {
-        const P = ComponentConfigurationPageViewModel
-        return (this.detail?.preparations ?? []).map(p => P.PreparationLine(p)).join(P.LineJoin)
+        return this.PreparationLines(ConfigurationPreparationOutcome.Prepared)
     }
 
-    public get HasPreparations(): boolean
+    public get HasReady(): boolean
     {
-        return (this.detail?.preparations ?? []).length > 0
+        return this.ReadyText.length > 0
+    }
+
+    // Where it is not, with the settings to change (a warning).
+    public get RefusedText(): string
+    {
+        return this.PreparationLines(ConfigurationPreparationOutcome.Refused)
+    }
+
+    public get HasRefused(): boolean
+    {
+        return this.RefusedText.length > 0
+    }
+
+    private PreparationLines(outcome: ConfigurationPreparationOutcome): string
+    {
+        const P = ComponentConfigurationPageViewModel
+        return (this.detail?.preparations ?? []).filter(p => p.outcome === outcome).map(p => P.PreparationLine(p)).join(P.LineJoin)
     }
 
     // The version whose document is shown; '' while none is.
@@ -456,7 +474,7 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     {
         const P = ComponentConfigurationPageViewModel
         const before = [this.ComponentVersionText, this.HeadText, this.HasSettings, this.HasVersions, this.HasTargets, this.HasApplies] as const
-        const preparationBefore = [this.PreparationText, this.HasPreparations] as const
+        const preparationBefore = [this.ReadyText, this.HasReady, this.RefusedText, this.HasRefused] as const
         this.detail = detail
         this.head = head
         const versions = [...detail.versions].sort((a, b) => b.version - a.version)
@@ -476,8 +494,10 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         this.RaiseIfChanged(P.HasVersionsProperty, before[3], this.HasVersions)
         this.RaiseIfChanged(P.HasTargetsProperty, before[4], this.HasTargets)
         this.RaiseIfChanged(P.HasAppliesProperty, before[5], this.HasApplies)
-        this.RaiseIfChanged(P.PreparationTextProperty, preparationBefore[0], this.PreparationText)
-        this.RaiseIfChanged(P.HasPreparationsProperty, preparationBefore[1], this.HasPreparations)
+        this.RaiseIfChanged(P.ReadyTextProperty, preparationBefore[0], this.ReadyText)
+        this.RaiseIfChanged(P.HasReadyProperty, preparationBefore[1], this.HasReady)
+        this.RaiseIfChanged(P.RefusedTextProperty, preparationBefore[2], this.RefusedText)
+        this.RaiseIfChanged(P.HasRefusedProperty, preparationBefore[3], this.HasRefused)
         this.RaiseIfChanged(P.HasNoSettingsProperty, !before[2], this.HasNoSettings)
         this.RaiseIfChanged(P.HasNoVersionsProperty, !before[3], this.HasNoVersions)
         this.RaiseIfChanged(P.HasNoTargetsProperty, !before[4], this.HasNoTargets)

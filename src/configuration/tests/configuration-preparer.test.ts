@@ -2,11 +2,12 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ComponentDescriptorBuilder, SettingType, type ComponentDescriptor } from '@pragmatic-tech-ai/pragmatic-component'
 import {
-    AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEntries, ApplyTarget, ConfigurationPreparationStatus, ConfigurationSaveRequest, ConfigurationScope,
-    InMemoryConfigurationRepository,
+    AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEntries, ApplyOutcome, ApplyRequest, ApplyTarget, ConfigurationPreparationStatus, ConfigurationSaveRequest,
+    ConfigurationScope, InMemoryConfigurationRepository,
 } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeApiClient, KubeMethod } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationPreparationOutcome, ConfigurationTarget, type IComponentDescriptorSource } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { ConfigMapWriteLock } from '../config-map-write-lock.js'
 import { ConfigurationPreparer, PreparationResult } from '../configuration-preparer.js'
 import { FixedTargets } from './configuration-fixture.js'
 import { FakeCluster } from './fake-cluster.js'
@@ -65,12 +66,12 @@ class PrepareWorld
         return cluster
     }
 
-    public static Descriptors(current: ComponentDescriptor = PrepareWorld.Idp024()): IComponentDescriptorSource
+    public static Descriptors(current: ComponentDescriptor = PrepareWorld.Idp024(), known: readonly ComponentDescriptor[] = []): IComponentDescriptorSource
     {
         return {
             Names: () => [PrepareWorld.Idp],
             Current: (component: string) => component === PrepareWorld.Idp ? current : undefined,
-            For: async () => undefined,
+            For: async (_component: string, version: string) => known.find(d => d.Version === version),
         }
     }
 
@@ -81,10 +82,10 @@ class PrepareWorld
         return new ConfigurationTarget(W.Namespace, new ApplyTarget('default-mvp-hive', W.Namespace, W.Namespace), running.ContentDigest(), running.Version)
     }
 
-    public static Preparer(cluster: FakeCluster, repository = new InMemoryConfigurationRepository(), current?: ComponentDescriptor, lines: string[] = []): ConfigurationPreparer
+    public static Preparer(cluster: FakeCluster, repository = new InMemoryConfigurationRepository(), current?: ComponentDescriptor, lines: string[] = [], known: readonly ComponentDescriptor[] = []): ConfigurationPreparer
     {
         const W = PrepareWorld
-        return new ConfigurationPreparer(new KubeApiClient(cluster), repository, W.Descriptors(current), new FixedTargets(new Map([[W.Idp, [W.Target()]]])), line => lines.push(line))
+        return new ConfigurationPreparer(new KubeApiClient(cluster), repository, W.Descriptors(current, known), new FixedTargets(new Map([[W.Idp, [W.Target()]]])), new ConfigMapWriteLock(), line => lines.push(line))
     }
 
     public static Map(cluster: FakeCluster): Obj
@@ -136,9 +137,118 @@ describe('ConfigurationPreparer', () =>
         const applied = AppliedConfiguration.From(v1, W.Idp020())
         assert.ok(JSON.stringify(applied.Document).includes('databaseUrl'))
         const cluster = W.Cluster(applied)
-        const [result] = await W.Preparer(cluster, repository).PrepareAll(W.Tenant)
+        const [result] = await W.Preparer(cluster, repository, undefined, [], [W.Idp020()]).PrepareAll(W.Tenant)
         assert.equal(result.Result, PreparationResult.Prepared)
         assert.equal((await repository.Head(W.Scope()))?.Number, 2)
+        // Without the old descriptor, the target's last apply of that version vouches for the repository's content.
+        const viaRecord = new InMemoryConfigurationRepository()
+        const r1 = await viaRecord.Save(new ConfigurationSaveRequest(W.Scope(), 0, authored, W.Idp020(), 'subject-admin', 'first'))
+        const pending = await viaRecord.BeginApply(new ApplyRequest(W.Scope(), r1.Number, W.Target().Target, 'subject-admin'))
+        await viaRecord.CompleteApply(W.Scope(), pending.Id, ApplyOutcome.Applied, '')
+        const [recorded] = await W.Preparer(W.Cluster(AppliedConfiguration.From(r1, W.Idp020())), viaRecord).PrepareAll(W.Tenant)
+        assert.equal(recorded.Result, PreparationResult.Prepared)
+    })
+
+    it('a repository version of the same number but other content is not taken for the applied one', async () =>
+    {
+        const W = PrepareWorld
+        const repository = new InMemoryConfigurationRepository()
+        // The repository's version 1 sets 9 attempts; the hand-applied "version 1" sets 5.
+        await repository.Save(new ConfigurationSaveRequest(W.Scope(), 0, { options: { ...W.Document.options, local: { maxAttempts: 9 } } }, W.Idp020(), 'subject-admin', 'other'))
+        const cluster = W.Cluster(W.Applied(W.Document, 1))
+        await W.Preparer(cluster, repository, undefined, [], [W.Idp020()]).PrepareAll(W.Tenant)
+        const entry = AppliedConfigurationEntries.Prepared(W.Map(cluster)).get(W.Idp024().ContentDigest())
+        assert.equal((entry?.Document as any).options.local.maxAttempts, 5)
+    })
+
+    it('with the old descriptor known, its filled-in defaults for a retired setting are left behind, not refused', async () =>
+    {
+        const W = PrepareWorld
+        const d = W.Idp020()
+        const filled = { options: { ...W.Document.options, core: { databaseUrl: 'postgres://localhost/idp' } } }
+        const cluster = W.Cluster(new AppliedConfiguration(W.Tenant, W.Idp, 3, d.Version, d.ContentDigest(), filled as never))
+        const [known] = await W.Preparer(cluster, new InMemoryConfigurationRepository(), undefined, [], [d]).PrepareAll(W.Tenant)
+        assert.equal(known.Result, PreparationResult.Prepared)
+        const [unknown] = await W.Preparer(W.Cluster(new AppliedConfiguration(W.Tenant, W.Idp, 3, d.Version, d.ContentDigest(), filled as never))).PrepareAll(W.Tenant)
+        assert.equal(unknown.Result, PreparationResult.Refused, 'without the old descriptor a value cannot be told from a default')
+    })
+
+    it('an apply since the preparation makes it stale: listed nowhere, prepared again from the new file', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const repository = new InMemoryConfigurationRepository()
+        const preparer = W.Preparer(cluster, repository)
+        await preparer.PrepareAll(W.Tenant)
+        const next = W.Applied({ options: { ...W.Document.options, local: { maxAttempts: 8 } } }, 5)
+        const map = W.Map(cluster)
+        map.data['configuration.json'] = next.ToCanonicalJson()
+        map.metadata.annotations['pragmatic-tech.ai/configuration-hash'] = next.ContentHash()
+        assert.equal(ConfigurationPreparationStatus.Of(map.metadata.annotations).Holds(next.ContentHash()), false)
+        assert.deepEqual(await preparer.For(W.Idp, [W.Target()]), [], 'a stale status is not shown as ready')
+        await preparer.PrepareAll(W.Tenant)
+        const entry = AppliedConfigurationEntries.Prepared(W.Map(cluster)).get(W.Idp024().ContentDigest())
+        assert.equal((entry?.Document as any).options.local.maxAttempts, 8, 'derived from the file applied now')
+        assert.ok(ConfigurationPreparationStatus.Of(W.Map(cluster).metadata.annotations).Holds(next.ContentHash()))
+    })
+
+    it('a release older than the applied component version prepares nothing back', async () =>
+    {
+        const W = PrepareWorld
+        const older = new ComponentDescriptorBuilder(W.Idp, '0.1.9').Option('local', 'Local accounts', o => o.Setting('maxAttempts', SettingType.Integer, s => s.Default(5))).Build()
+        const cluster = W.Cluster()
+        const [result] = await W.Preparer(cluster, new InMemoryConfigurationRepository(), older).PrepareAll(W.Tenant)
+        assert.equal(result.Result, PreparationResult.Ahead)
+        assert.equal(cluster.Calls.filter(c => c.method === KubeMethod.Patch).length, 0)
+    })
+
+    it('entries for descriptors nobody runs or rolls to are dropped; the one the target runs is kept and not listed', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const map = W.Map(cluster)
+        const gone = new AppliedConfiguration(W.Tenant, W.Idp, 2, '0.1.0', `sha256:${'9'.repeat(64)}`, W.Document as never)
+        cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(map as never, gone) as never)
+        const preparer = W.Preparer(cluster)
+        await preparer.PrepareAll(W.Tenant)
+        assert.deepEqual([...AppliedConfigurationEntries.Prepared(W.Map(cluster)).keys()], [W.Idp024().ContentDigest()])
+        const running = new ConfigurationTarget(W.Namespace, W.Target().Target, W.Idp024().ContentDigest(), '0.2.4')
+        assert.deepEqual(await preparer.For(W.Idp, [running]), [], 'the target already runs that descriptor')
+    })
+
+    it('writes only what the console owns, conditioned on the resourceVersion it read', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const map = W.Map(cluster)
+        map.data['notes.txt'] = 'put here by someone else'
+        map.metadata.annotations['example.com/owner'] = 'someone else'
+        map.metadata.labels['example.com/team'] = 'x'
+        map.metadata.resourceVersion = '41'
+        await W.Preparer(cluster).PrepareAll(W.Tenant)
+        const body = cluster.Calls.filter(c => c.method === KubeMethod.Patch && c.path.startsWith(W.ConfigMapPath)).map(c => c.body as Obj)[0]
+        assert.equal('notes.txt' in body.data, false)
+        assert.equal('example.com/owner' in body.metadata.annotations, false)
+        assert.equal('example.com/team' in body.metadata.labels, false)
+        assert.equal(body.metadata.resourceVersion, '41')
+        assert.ok('configuration.json' in body.data)
+    })
+
+    it('an entry of another component is not taken for prepared; a refused setting name is unescaped', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const map = W.Map(cluster)
+        const d = W.Idp024()
+        const foreign = new AppliedConfiguration(W.Tenant, 'pragmatic-hive-agent', 4, d.Version, d.ContentDigest(), { options: {} })
+        const marked = AppliedConfigurationEntries.With(map as never, foreign)
+        marked.metadata.annotations = ConfigurationPreparationStatus.Of(marked.metadata.annotations).DerivedFrom(W.Applied().ContentHash()).WithPrepared(d.ContentDigest()).Over(marked.metadata.annotations)
+        cluster.Objects.set(W.ConfigMapPath, marked as never)
+        await W.Preparer(cluster).PrepareAll(W.Tenant)
+        assert.equal(AppliedConfigurationEntries.Prepared(W.Map(cluster)).get(d.ContentDigest())?.Component, W.Idp, 'prepared again for its own component')
+        const odd = W.Cluster(W.Applied({ options: { ...W.Document.options, 'a/b': {} } }))
+        const [refused] = await W.Preparer(odd).PrepareAll(W.Tenant)
+        assert.deepEqual(refused.Settings, ['a/b'])
     })
 
     it('a document the new descriptor refuses is recorded refused naming the settings; nothing is saved or prepared', async () =>
