@@ -216,6 +216,46 @@ describe('ConfigurationPreparer', () =>
         assert.deepEqual(await preparer.For(W.Idp, [running]), [], 'the target already runs that descriptor')
     })
 
+    it('never drops an entry when what the target runs is unknown (after an apply, or an unmapped image)', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const map = W.Map(cluster)
+        const running = new AppliedConfiguration(W.Tenant, W.Idp, 2, '0.2.1', `sha256:${'8'.repeat(64)}`, W.Document as never)
+        cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(map as never, running) as never)
+        const unknown = new ConfigurationTarget(W.Namespace, W.Target().Target, undefined, undefined)
+        const preparer = new ConfigurationPreparer(new KubeApiClient(cluster), new InMemoryConfigurationRepository(), W.Descriptors(), new FixedTargets(new Map([[W.Idp, [unknown]]])))
+        await preparer.PrepareAll(W.Tenant)
+        assert.ok(AppliedConfigurationEntries.Prepared(W.Map(cluster)).has(running.DescriptorDigest))
+        await preparer.PrepareApplied(W.Applied(), W.Target().Target)
+        assert.ok(AppliedConfigurationEntries.Prepared(W.Map(cluster)).has(running.DescriptorDigest), 'nor after an apply')
+    })
+
+    it('a hand-applied object without a hash annotation gets the applied file hash, so its status holds and is listed', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const map = W.Map(cluster)
+        delete map.metadata.annotations['pragmatic-tech.ai/configuration-hash']
+        const preparer = W.Preparer(cluster)
+        await preparer.PrepareAll(W.Tenant)
+        const annotations = W.Map(cluster).metadata.annotations
+        assert.equal(annotations['pragmatic-tech.ai/configuration-hash'], W.Applied().ContentHash())
+        assert.ok(ConfigurationPreparationStatus.Of(annotations).Holds(W.Applied().ContentHash()))
+        assert.equal((await preparer.For(W.Idp, [W.Target()])).length, 1)
+    })
+
+    it('versions that do not compare are not prepared, and said so', async () =>
+    {
+        const W = PrepareWorld
+        const d = W.Idp020()
+        const cluster = W.Cluster(new AppliedConfiguration(W.Tenant, W.Idp, 3, 'dev', d.ContentDigest(), W.Document as never))
+        const lines: string[] = []
+        const [result] = await W.Preparer(cluster, new InMemoryConfigurationRepository(), undefined, lines).PrepareAll(W.Tenant)
+        assert.equal(result.Result, PreparationResult.Ahead)
+        assert.ok(lines.some(l => l.includes('do not compare')))
+    })
+
     it('writes only what the console owns, conditioned on the resourceVersion it read', async () =>
     {
         const W = PrepareWorld

@@ -104,6 +104,8 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
     private static readonly LogRefused = ': refused for '
     private static readonly LogChange = ', change '
     private static readonly LogFailed = ': preparing failed: '
+    private static readonly LogUnordered = ': not prepared, the versions do not compare: '
+    private static readonly LogAnd = ' and '
     private static readonly Space = ' '
     private static readonly SettingsSeparator = ', '
     private static readonly SaveAttempts = 2
@@ -225,13 +227,18 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
         if (applied.Realm !== tenantId || applied.Component !== component) return new PreparationReport(component, target, PreparationResult.Skipped)
         const digest = descriptor.ContentDigest()
         if (applied.DescriptorDigest === digest) return new PreparationReport(component, target, PreparationResult.Current)
+        if (ComponentVersionOrder.Compare(descriptor.Version, applied.ComponentVersion) === undefined)
+        {
+            this.Log(component, target, P.LogUnordered + applied.ComponentVersion + P.LogAnd + descriptor.Version)
+            return new PreparationReport(component, target, PreparationResult.Ahead)
+        }
         if (!ComponentVersionOrder.IsNewer(descriptor.Version, applied.ComponentVersion)) return new PreparationReport(component, target, PreparationResult.Ahead)
         const entries = P.EntriesOf(map)
         // What was prepared from another applied file is stale; entries for descriptors nobody runs or rolls to go.
         const status = ConfigurationPreparationStatus.Of(map.metadata?.annotations).DerivedFrom(applied.ContentHash())
-        const kept = new Set([digest, target.DescriptorDigest])
-        const obsolete = [...entries.keys()].filter(d => !kept.has(d))
-        const base = AppliedConfigurationEntries.Without(P.Writable(map, component, target, status), obsolete)
+        // Only when what the target runs is known: an entry its pods may run from is never dropped on a guess.
+        const obsolete = target.DescriptorDigest === undefined ? [] : [...entries.keys()].filter(d => d !== digest && d !== target.DescriptorDigest)
+        const base = AppliedConfigurationEntries.Without(P.Writable(map, component, target, status, applied), obsolete)
         const existing = entries.get(digest)
         if (status.IsPrepared(digest) && existing !== undefined && existing.Realm === applied.Realm && existing.Component === component && new ConfigurationValidator(descriptor).Validate(existing.Document).Valid)
         {
@@ -345,11 +352,14 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
 
     // The object as this console writes it back: only the members it owns (the applier's set and the entries), the status
     // given, and the resourceVersion read, so a write over a change made since is refused (409).
-    private static Writable(map: ConfigMapShape, component: string, target: ConfigurationTarget, status: ConfigurationPreparationStatus): IAppliedConfigMap
+    private static Writable(map: ConfigMapShape, component: string, target: ConfigurationTarget, status: ConfigurationPreparationStatus, applied: AppliedConfiguration): IAppliedConfigMap
     {
         const P = ConfigurationPreparer
         const data = P.Owned(map.data, key => P.OwnedData.includes(key) || AppliedConfigurationEntries.DigestOfKey(key) !== undefined)
-        const annotations = status.Over(P.Owned(map.metadata?.annotations, key => P.OwnedAnnotations.includes(key)))
+        // A hand-applied object may lack the hash the status is checked against: it is the applied file's own (the pod
+        // template's annotation, which rolls, is not touched).
+        const owned = { [AppliedConfigurationKeys.HashAnnotation]: applied.ContentHash(), ...P.Owned(map.metadata?.annotations, key => P.OwnedAnnotations.includes(key)) }
+        const annotations = status.Over(owned)
         const labels = P.Owned(map.metadata?.labels, key => P.OwnedLabels.includes(key))
         const metadata: IAppliedConfigMap['metadata'] & { resourceVersion?: string } = { name: AppliedConfigurationKeys.ObjectNamePrefix + component, namespace: target.Target.Namespace, labels, annotations }
         if (typeof map.metadata?.resourceVersion === 'string') metadata.resourceVersion = map.metadata.resourceVersion

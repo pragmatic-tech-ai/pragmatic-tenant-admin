@@ -22,7 +22,7 @@ export class ConsoleStartFallback
 {
     public static readonly RevertedNote = 'the previous configuration of the console was put back'
     public static readonly IgnoredNote = 'started without its applied configuration (validated for another console version, and it does not carry over): '
-    public static readonly DroppedNote = 'started on its applied configuration of another console version, leaving behind the settings this version no longer has: '
+    public static readonly DroppedNote = 'started on its applied configuration of another console version, leaving behind the settings this version no longer has or refuses: '
     private static readonly NameSeparator = ', '
     /** The revert reads and writes by namespace and name only; the hive is not known before the console starts. */
     private static readonly LocalHive = 'local'

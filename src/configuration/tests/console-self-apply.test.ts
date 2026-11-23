@@ -293,7 +293,7 @@ describe('ConsoleSelfApply and prepared entries', () =>
             const env2: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path, PRAGMATIC_TENANT_ADMIN_PORT: '7100' }
             assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env2, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, ignored), '7100')
             assert.equal(ignored.Code, undefined, 'the console still starts')
-            assert.match(ignored.Text, /started without its applied configuration/)
+            assert.match(ignored.Text, /leaving behind .*core\.port/, 'a setting it refuses is left behind, the rest still applies')
         }
         finally
         {

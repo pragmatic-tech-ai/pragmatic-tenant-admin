@@ -200,6 +200,24 @@ describe('KubeConfigurationApplier and prepared entries', () =>
         assert.deepEqual(prepared, [{ version: 2, namespace: W.Namespace }, { version: 2, namespace: W.Namespace }], 'the reverted-to file is prepared, never the refused one')
     })
 
+    it('a revert brings back the entry for the applied descriptor the pods rolled back may run from', async () =>
+    {
+        const W = ApplyWorld
+        // configuration.json is for an older descriptor; the pods run the applied version's descriptor from its entry.
+        const own = W.Applied(1, 7100)
+        const olderDigest = `sha256:${'6'.repeat(64)}`
+        const older = new AppliedConfiguration(F.Tenant, own.Component, 1, '0.0.9', olderDigest, { options: {} })
+        const cluster = W.Cluster(older)
+        const map = cluster.Objects.get(W.ConfigMapPath) as Obj
+        cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(map as never, own) as Obj)
+        const bad = W.Applied(2, 1)
+        cluster.Readies = template => template.metadata?.annotations?.[W.Hash] !== bad.ContentHash()
+        assert.equal(await W.Applier(cluster).Apply(bad, W.Target()), ConfigurationApplyResult.Reverted)
+        const restored = cluster.Objects.get(W.ConfigMapPath) as Obj
+        assert.equal(AppliedConfigurationCodec.FromConfigMap(restored).DescriptorDigest, olderDigest)
+        assert.equal(AppliedConfigurationEntries.Prepared(restored).get(own.DescriptorDigest)?.Version, 1, 'the entry the apply dropped is back')
+    })
+
     it('a revert keeps the entries prepared while the roll was watched', async () =>
     {
         const W = ApplyWorld

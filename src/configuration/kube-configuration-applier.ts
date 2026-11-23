@@ -108,15 +108,16 @@ export class KubeConfigurationApplier implements IConfigurationApplier
         }
         try
         {
+            // The file and its entries are back, and prepared again, before the old template rolls the pods back.
             await this.Restore(configMapPath, previous)
+            const restored = K.AppliedOf(previous)
+            if (restored !== undefined) await this.PrepareAgain(restored, target)
         }
         finally
         {
             // The old template comes back even when the file cannot be restored.
             await this.client.Patch(deploymentPath, K.HashPatch(typeof previousHash === 'string' ? previousHash : null, typeof previousRevision === 'string' ? previousRevision : null), KubeContentType.StrategicMerge)
         }
-        const restored = K.AppliedOf(previous)
-        if (restored !== undefined) await this.PrepareAgain(restored, target)
         return ConfigurationApplyResult.Reverted
     }
 
@@ -163,9 +164,11 @@ export class KubeConfigurationApplier implements IConfigurationApplier
             .filter((entry): entry is [string, string] => entry[0] !== K.LastApplied && typeof entry[1] === 'string'))
         metadata[K.AnnotationsKey] = ConfigurationPreparationStatus.Of(current?.metadata?.annotations).Over(annotations)
         const data: Record<string, unknown> = {}
+        // Every entry the previous object had comes back (the pods rolled back may run from one the apply dropped), and
+        // what was prepared since wins for its digest.
         for (const [key, value] of Object.entries(previous.data ?? {}))
         {
-            if (AppliedConfigurationEntries.DigestOfKey(key) === undefined) data[key] = value
+            data[key] = value
         }
         for (const [key, value] of Object.entries(current?.data ?? {}))
         {
