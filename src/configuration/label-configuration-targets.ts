@@ -17,6 +17,9 @@ export interface IConfiguredNamespaces
     Namespaces(tenantId: string): Promise<readonly string[]>
     /** Whether `deployment` in `namespace` is the one the console's manifests render for `component` (for an environment
      *  workload, of `environment`); a Deployment merely carrying the labels is never a target. */
+    /** The one Deployment name the manifests give a hive component in a namespace the console may only read by name (its
+     *  Role there grants get and patch on named Deployments, never list); undefined where it may list (environments). */
+    FixedDeployment(component: string, namespace: string): string | undefined
     Expected(component: string, namespace: string, deployment: string, environment: string | undefined): boolean
 }
 
@@ -67,7 +70,7 @@ export class LabelConfigurationTargets implements IConfigurationTargetSource
             let items: unknown[]
             try
             {
-                items = await this.kube.List(KubeResourceCatalog.PathOf(L.DeploymentType, namespace), selector)
+                items = await this.Candidates(component, namespace, selector)
             }
             catch
             {
@@ -80,6 +83,18 @@ export class LabelConfigurationTargets implements IConfigurationTargetSource
             }
         }
         return LabelConfigurationTargets.Unique(out).sort((a, b) => a.Name.localeCompare(b.Name))
+    }
+
+    // Where the console may only get Deployments by name, the one the manifests render; elsewhere the labelled ones.
+    private async Candidates(component: string, namespace: string, selector: string): Promise<unknown[]>
+    {
+        const L = LabelConfigurationTargets
+        const fixed = this.namespaces.FixedDeployment(component, namespace)
+        if (fixed === undefined) return this.kube.List(KubeResourceCatalog.PathOf(L.DeploymentType, namespace), selector)
+        const found = await this.kube.Get(KubeResourceCatalog.PathOf(L.DeploymentType, namespace, fixed)) as DeploymentShape | undefined
+        const labels = found?.metadata?.labels
+        const labelled = ComponentConfigurationMounts.ContainerOf(labels, component) !== undefined && labels?.[ComponentConfigurationMounts.ManagedByLabel] === ComponentConfigurationMounts.ManagedBy
+        return found !== undefined && labelled ? [found] : []
     }
 
     // Names shared by two targets become their namespaces, and names still shared then `<namespace>/<deployment>`.

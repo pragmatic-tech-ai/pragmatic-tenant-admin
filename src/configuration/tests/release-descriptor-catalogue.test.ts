@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DescriptorUnavailableError } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { ReleaseDescriptorsAbsentError } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import { TenantAdminComponent } from '../../tenant-admin-component.js'
@@ -40,6 +43,15 @@ describe('ReleaseDescriptorCatalogue', () =>
         await assert.rejects(keyless.For(F.Agent, '0.2.0'), DescriptorUnavailableError)
     })
 
+    it('one unreachable release does not hide a version an older adopted release carries', async () =>
+    {
+        const good = F.Registry()
+        const reader = { Descriptors: (version: string) => version === '0.3.0' ? Promise.reject(new Error('registry timeout')) : good.Descriptors(version) }
+        const catalogue = new ReleaseDescriptorCatalogue(F.Mounted(), TenantAdminComponent.Descriptor(), reader, ['0.3.0', '0.2.0'])
+        assert.equal((await catalogue.For(F.Agent, '0.2.0'))?.ContentDigest(), F.Agent020().ContentDigest())
+        await assert.rejects(catalogue.For(F.Agent, '9.9.9'), DescriptorUnavailableError, 'a version nothing carries is unavailable, not absent, while a release could not be read')
+    })
+
     it('an older release that carries no descriptors holds none, for good: not found, never asked again', async () =>
     {
         let reads = 0
@@ -57,5 +69,19 @@ describe('ReleaseDescriptorCatalogue', () =>
         const bare = ReleaseDescriptorCatalogue.FromDirectory('/no/such/descriptors', TenantAdminComponent.Descriptor(), undefined, [])
         assert.deepEqual(bare.Names(), ['pragmatic-tenant-admin'])
         assert.equal(bare.Current('pragmatic-platform-admin'), undefined)
+    })
+
+    it('an empty mounted directory (the optional ConfigMap is absent) is no mounted set, not a start failure', () =>
+    {
+        const dir = mkdtempSync(join(tmpdir(), 'descriptors-'))
+        try
+        {
+            const bare = ReleaseDescriptorCatalogue.FromDirectory(dir, TenantAdminComponent.Descriptor(), undefined, [])
+            assert.deepEqual(bare.Names(), ['pragmatic-tenant-admin'])
+        }
+        finally
+        {
+            rmSync(dir, { recursive: true, force: true })
+        }
     })
 })

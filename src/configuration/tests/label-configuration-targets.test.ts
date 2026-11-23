@@ -15,6 +15,12 @@ class Namespaces implements IConfiguredNamespaces
         return ['pragmatic-system', 'pragmatic-env-dev1', 'pragmatic-env-dev2', 'pragmatic-env-locked']
     }
 
+    // The hive's own components have one Deployment each in pragmatic-system.
+    public FixedDeployment(component: string, namespace: string): string | undefined
+    {
+        return namespace === 'pragmatic-system' && component === 'pragmatic-hive-agent' ? 'pragmatic-hive-agent-h1' : undefined
+    }
+
     // Every name the test cluster renders, never the impostor.
     public Expected(_component: string, _namespace: string, deployment: string): boolean
     {
@@ -84,6 +90,22 @@ describe('LabelConfigurationTargets', () =>
         const selector = cluster.Calls.find(c => c.path.includes('labelSelector'))!.path
         assert.ok(decodeURIComponent(selector).includes('app.kubernetes.io/managed-by=pragmatic-tenant-admin'))
         assert.ok(K8sManifestBuilder.SystemNamespace === 'pragmatic-system')
+    })
+
+    it('finds a hive component by its Deployment name where the console may only get it, never list the namespace', async () =>
+    {
+        const cluster = TargetsWorld.Cluster()
+        cluster.Refusals.set('GET /apis/apps/v1/namespaces/pragmatic-system/deployments', 403)
+        const targets = new LabelConfigurationTargets(new KubeApiClient(cluster), new Namespaces(), new Images({}), { VersionOf: () => undefined })
+        assert.deepEqual((await targets.For(F.Agent, F.Tenant)).map(t => [t.Name, t.Target.Deployment]), [['pragmatic-system', 'pragmatic-hive-agent-h1']])
+        assert.ok(!cluster.Calls.some(c => c.path.startsWith('/apis/apps/v1/namespaces/pragmatic-system/deployments?')), 'the namespace is never listed')
+    })
+
+    it('finds nothing for a hive component whose Deployment is absent or is not labelled for the component', async () =>
+    {
+        const cluster = TargetsWorld.Cluster()
+        const targets = new LabelConfigurationTargets(new KubeApiClient(cluster), new Namespaces(), new Images({}), { VersionOf: () => undefined })
+        assert.deepEqual(await targets.For('pragmatic-tenant-admin', F.Tenant), [])
     })
 
     it('shows two targets that would share a name by their namespaces', async () =>

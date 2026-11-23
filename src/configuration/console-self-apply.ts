@@ -1,6 +1,7 @@
 import { ApplyOutcome, AppliedConfigurationKeys, ConfigurationScope, type ApplyTarget, type IConfigurationRepository } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeContentType, KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { KubeConfigurationApplier } from './kube-configuration-applier.js'
 
 type ConfigMapShape = { metadata?: { name?: unknown; namespace?: unknown; labels?: unknown; annotations?: Record<string, unknown> }; data?: Record<string, unknown> }
 type DeploymentShape = { spec?: { template?: { metadata?: { annotations?: Record<string, unknown> } } } }
@@ -26,6 +27,7 @@ export class ConsoleSelfApply
     public static readonly PreviousAnnotationsKey = 'previous-annotations.json'
     public static readonly PreviousHashAnnotation = 'pragmatic-tech.ai/previous-configuration-hash'
     public static readonly SupersededDetail = 'superseded'
+    public static readonly InterruptedDetail = 'interrupted: the console restarted during the roll'
     private static readonly ConfigMapType = { apiVersion: 'v1', kind: 'ConfigMap' }
     private static readonly DeploymentType = { apiVersion: 'apps/v1', kind: 'Deployment' }
     /** The annotations a restored configuration file goes with (`AppliedConfigurationCodec.ToConfigMap`). */
@@ -99,7 +101,7 @@ export class ConsoleSelfApply
                 [S.AnnotationsKey]: S.KeptAnnotations(current.data?.[S.PreviousAnnotationsKey]),
             },
             [S.DataKey]: data,
-        })
+        }, KubeConfigurationApplier.FieldManager)
         return true
     }
 
@@ -110,21 +112,55 @@ export class ConsoleSelfApply
         const scope = new ConfigurationScope(tenantId, this.component)
         const pending = (await repository.Applies(scope)).filter(a => a.Outcome === ApplyOutcome.Pending && a.Target.Equals(this.Self))
         const map = await this.client.Get(this.ConfigMapPath()) as ConfigMapShape | undefined
-        if (pending.length > 0)
+        try
         {
-            const running = await this.RunningVersion(map)
-            const newest = pending.reduce((a, b) => (b.Id > a.Id ? b : a))
-            for (const apply of pending)
+            if (pending.length > 0)
             {
-                if (apply !== newest)
+                const running = await this.RunningVersion(map)
+                const newest = pending.reduce((a, b) => (b.Id > a.Id ? b : a))
+                for (const apply of pending)
                 {
-                    await repository.CompleteApply(scope, apply.Id, ApplyOutcome.Failed, S.SupersededDetail)
-                    continue
+                    if (apply !== newest)
+                    {
+                        await repository.CompleteApply(scope, apply.Id, ApplyOutcome.Failed, S.SupersededDetail)
+                        continue
+                    }
+                    const applied = running === apply.Version
+                    await repository.CompleteApply(scope, apply.Id, applied ? ApplyOutcome.Applied : ApplyOutcome.Failed, applied ? S.NoText : ConfigurationService.RolloutNotReadyDetail)
                 }
-                const applied = running === apply.Version
-                await repository.CompleteApply(scope, apply.Id, applied ? ApplyOutcome.Applied : ApplyOutcome.Failed, applied ? S.NoText : ConfigurationService.RolloutNotReadyDetail)
             }
         }
+        finally
+        {
+            // What was kept goes even when the record cannot be written: it must never outlive the start that settled.
+            await this.Forget(map)
+        }
+    }
+
+    /**
+     * Fails the pending applies to other components' Deployments, which were watched by the console that has just
+     * restarted (its watch is gone; the file and hash it wrote stay as they were). An admin re-applies the version they
+     * want from the console.
+     */
+    public async SettleInterrupted(repository: IConfigurationRepository, tenantId: string, components: readonly string[]): Promise<void>
+    {
+        const S = ConsoleSelfApply
+        for (const component of components)
+        {
+            const scope = new ConfigurationScope(tenantId, component)
+            for (const apply of await repository.Applies(scope))
+            {
+                if (apply.Outcome === ApplyOutcome.Pending && !apply.Target.Equals(this.Self))
+                {
+                    await repository.CompleteApply(scope, apply.Id, ApplyOutcome.Failed, S.InterruptedDetail)
+                }
+            }
+        }
+    }
+
+    private async Forget(map: ConfigMapShape | undefined): Promise<void>
+    {
+        const S = ConsoleSelfApply
         if (map?.data?.[S.PreviousKey] !== undefined)
         {
             await this.client.Patch(this.ConfigMapPath(), {

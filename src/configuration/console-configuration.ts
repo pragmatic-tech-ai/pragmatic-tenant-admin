@@ -40,6 +40,16 @@ export class ConsoleConfiguredNamespaces implements IConfiguredNamespaces
         return [...new Set([K8sManifestBuilder.SystemNamespace, K8sManifestBuilder.IdpNameOf(tenantId), ...environments])]
     }
 
+    public FixedDeployment(component: string, namespace: string): string | undefined
+    {
+        const B = K8sManifestBuilder
+        const C = ConsoleConfiguredNamespaces
+        if (namespace === B.SystemNamespace && component === C.HiveAgent) return B.HiveAgentNameOf(this.Hive)
+        if (namespace === B.SystemNamespace && component === C.TenantAdmin) return B.TenantAdminNameOf(this.tenantId)
+        if (namespace === B.IdpNameOf(this.tenantId) && component === C.TenantIdp) return B.IdpNameOf(this.tenantId)
+        return undefined
+    }
+
     public Expected(component: string, namespace: string, deployment: string, environment: string | undefined): boolean
     {
         const B = K8sManifestBuilder

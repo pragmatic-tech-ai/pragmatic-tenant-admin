@@ -59,18 +59,18 @@ class ExitRecorder implements IStartProcess
 
 describe('the console reads its configuration at start', () =>
 {
-    const Core = { dataRoot: '/configured', databaseUrl: 'secret:file/db-url', port: 7443, baseDomain: 'configured.test', secureCookie: true }
+    const Core = { fingerprintKey: 'secret:file/fp-key', port: 7443, baseDomain: 'configured.test', secureCookie: true }
 
     it('a mounted configuration overrides the declared variable before the settings are read', async () =>
     {
         await StartWorld.InFolder(async folder =>
         {
             const env = StartWorld.Env(await StartWorld.Configuration(folder, Core))
-            await writeFile(join(folder, 'db-url'), 'postgres://x')
+            await writeFile(join(folder, 'fp-key'), 'fingerprint')
             await ComponentStartConfiguration.Apply({ Declaration: TenantAdminComponent.Declaration, Env: env, Stores: ComponentStartConfiguration.Stores('', folder), SecretsDir: join(folder, 'run') })
             const config = TenantAdminServer.ReadConfig(env)
-            assert.deepEqual([config.dataRoot, config.port, config.baseDomain, config.secureCookie], ['/configured', 7443, 'configured.test', true])
-            assert.equal(env.PRAGMATIC_TENANT_ADMIN_DATABASE_URL_FILE, join(folder, 'run', 'core.databaseUrl'))
+            assert.deepEqual([config.dataRoot, config.port, config.baseDomain, config.secureCookie], ['/data', 7443, 'configured.test', true], 'the state folder stays the deployment own')
+            assert.equal(env.PRAGMATIC_TENANT_ADMIN_FINGERPRINT_KEY_FILE, join(folder, 'run', 'core.fingerprintKey'))
         })
     })
 
@@ -90,7 +90,7 @@ describe('the console reads its configuration at start', () =>
             const env = StartWorld.Env(await StartWorld.Configuration(folder, { port: 'not-a-port' }))
             await assert.rejects(ComponentStartConfiguration.ApplyOrExit({ Declaration: TenantAdminComponent.Declaration, Env: env }, process))
             assert.equal(process.Code, 78)
-            assert.match(process.Text, /pragmatic-tenant-admin: .*\(invalid\)/)
+            assert.match(process.Text, /pragmatic-tenant-admin: .*port.*\(invalid\)/, 'the refusal names the one setting that is wrong')
         })
     })
 
@@ -118,7 +118,7 @@ describe('the console reads its configuration at start', () =>
         {
             await writeFile(join(folder, 'token'), 'file-token')
             const client = TenantAdminServer.RolloutClientFrom({ PRAGMATIC_TENANT_ADMIN_ROLLOUT_URL: 'https://channel.test', PRAGMATIC_TENANT_ADMIN_ROLLOUT_TOKEN_FILE: join(folder, 'token'), PRAGMATIC_TENANT_ADMIN_ROLLOUT_HIVE_ID: 'h1' })
-            assert.ok(JSON.stringify(Object.keys(client)).length > 0)
+            assert.equal((client as unknown as { bearerToken: string }).bearerToken, 'file-token', 'the token is the content of the file')
             assert.throws(() => TenantAdminServer.RolloutClientFrom({ PRAGMATIC_TENANT_ADMIN_ROLLOUT_URL: 'https://channel.test', PRAGMATIC_TENANT_ADMIN_ROLLOUT_HIVE_ID: 'h1' }), /PRAGMATIC_TENANT_ADMIN_ROLLOUT_TOKEN/)
         })
     })

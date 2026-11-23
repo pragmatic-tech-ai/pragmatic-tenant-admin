@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { AppliedConfiguration, AppliedConfigurationCodec, ApplyTarget } from '@pragmatic-tech-ai/pragmatic-configuration'
-import { KubeApiClient, KubeContentType, KubeMethod } from '@pragmatic-tech-ai/pragmatic-kube'
+import { KubeApiClient, KubeContentType, KubeMethod, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationApplyResult } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../../tenant-admin-component.js'
 import { KubeConfigurationApplier } from '../kube-configuration-applier.js'
@@ -22,7 +22,7 @@ class ApplyWorld
     public static Applied(version: number, port: number): AppliedConfiguration
     {
         const descriptor = TenantAdminComponent.Descriptor()
-        return new AppliedConfiguration(F.Tenant, descriptor.Name, version, descriptor.Version, descriptor.ContentDigest(), { options: { core: { port, dataRoot: '/d', databaseUrl: 'secret:file/db', baseDomain: 'acme.test' } } })
+        return new AppliedConfiguration(F.Tenant, descriptor.Name, version, descriptor.Version, descriptor.ContentDigest(), { options: { core: { port, baseDomain: 'acme.test' } } })
     }
 
     public static Cluster(previous?: AppliedConfiguration): FakeCluster
@@ -53,6 +53,26 @@ class ApplyWorld
     {
         const map = cluster.Objects.get(ApplyWorld.ConfigMapPath) as Obj | undefined
         return map === undefined ? undefined : (AppliedConfigurationCodec.FromConfigMap(map as never).Document as Obj).options.core.port
+    }
+}
+
+/** A cluster that refuses the nth PATCH of one path (the first when n is 1), once. */
+class RefusingNthPatch extends FakeCluster
+{
+    private seen = 0
+
+    public constructor(private readonly refusedPath: string, private readonly nth: number)
+    {
+        super()
+    }
+
+    public override async Send(method: KubeMethod, path: string, body: string | undefined, type: KubeContentType): Promise<KubeResponse>
+    {
+        if (method === KubeMethod.Patch && path.split('?')[0] === this.refusedPath && ++this.seen === this.nth)
+        {
+            return { status: 403, body: JSON.stringify({ message: 'refused' }) }
+        }
+        return super.Send(method, path, body, type)
     }
 }
 
@@ -112,6 +132,30 @@ describe('KubeConfigurationApplier', () =>
         const cluster = W.Cluster()
         cluster.Refusals.set(`PATCH ${W.ConfigMapPath}`, 403)
         await assert.rejects(W.Applier(cluster).Apply(W.Applied(1, 7100), W.Target()))
+    })
+})
+
+describe('KubeConfigurationApplier partial failures', () =>
+{
+    it('a refused hash patch after the ConfigMap write puts the previous ConfigMap back and throws', async () =>
+    {
+        const W = ApplyWorld
+        const cluster = W.Cluster(W.Applied(1, 7100))
+        cluster.Refusals.set(`PATCH ${W.DeploymentPath}`, 403)
+        await assert.rejects(W.Applier(cluster).Apply(W.Applied(2, 7200), W.Target()))
+        assert.equal(W.PortOf(cluster), 7100, 'the new file is not left for the next restart')
+    })
+
+    it('a failed ConfigMap restore does not keep the previous hash from going back on the Deployment', async () =>
+    {
+        const W = ApplyWorld
+        const before = W.Applied(1, 7100)
+        const cluster = new RefusingNthPatch(W.ConfigMapPath, 2)
+        const seeded = W.Cluster(before)
+        for (const [path, object] of seeded.Objects) cluster.Put(path, object)
+        cluster.Readies = template => template.metadata?.annotations?.[W.Hash] !== W.Applied(2, 1).ContentHash()
+        await assert.rejects(W.Applier(cluster).Apply(W.Applied(2, 1), W.Target()))
+        assert.equal(cluster.Objects.get(W.DeploymentPath)!.spec.template.metadata.annotations[W.Hash], before.ContentHash(), 'the old template runs again')
     })
 })
 

@@ -1,19 +1,22 @@
 import { AppliedConfigurationCodec, AppliedConfigurationKeys, type AppliedConfiguration, type ApplyTarget } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeContentType, KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
-import { ConfigurationApplyResult, type IConfigurationApplier } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { ComponentConfigurationMounts, ConfigurationApplyResult, type IConfigurationApplier } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import type { ConsoleSelfApply } from './console-self-apply.js'
 import { RolloutState, type RolloutWatch } from './rollout-watch.js'
 
 type ObjectShape = { metadata?: Record<string, unknown>; data?: Record<string, unknown> }
 type DeploymentShape = { spec?: { template?: { metadata?: { annotations?: Record<string, unknown> } } } }
+type SecretShape = { metadata?: { resourceVersion?: unknown } }
 
 /**
  * The applier over the console's own Kubernetes access (its pod's service account), watched and reverted:
  *
  * 1. reads what is there now: the ConfigMap `pragmatic-config-<component>` (or none) and the configuration hash on the
  *    Deployment's pod template (or none);
- * 2. writes the new ConfigMap (server-side apply, created or updated in place under the same name) and the new content
- *    hash on the pod template (a strategic-merge patch), which rolls the Deployment when the content changed;
+ * 2. writes the new ConfigMap (server-side apply under the configuration field manager, created or updated in place under
+ *    the same name) and the new content hash on the pod template (a strategic-merge patch), which rolls the Deployment
+ *    when the content changed; beside it, the revision of the component's secrets Secret, so a secret written since the
+ *    last apply rolls the Deployment even for the same version (a component reads its secret files at start only);
  * 3. waits up to RolloutTimeoutMs for the roll (RolloutWatch). A surge-rolled workload (the hive agent,
  *    `maxUnavailable: 0`) keeps its old pod serving until a new one is ready; a recreated one (the console, the realm
  *    sign-in service, the env server: one writer on their data) is down while its new pod starts, at most until the
@@ -32,7 +35,10 @@ type DeploymentShape = { spec?: { template?: { metadata?: { annotations?: Record
 export class KubeConfigurationApplier implements IConfigurationApplier
 {
     public static readonly RolloutTimeoutMs = 120_000
+    /** Configuration writes keep their own field manager: a re-apply of a hive manifest never prunes what they wrote. */
+    public static readonly FieldManager = 'pragmatic-tenant-console-configuration'
     private static readonly ConfigMapType = { apiVersion: 'v1', kind: 'ConfigMap' }
+    private static readonly SecretType = { apiVersion: 'v1', kind: 'Secret' }
     private static readonly DeploymentType = { apiVersion: 'apps/v1', kind: 'Deployment' }
     /** What a restored object keeps of its metadata: the server owns the rest. */
     private static readonly KeptMetadata = ['name', 'namespace', 'labels', 'annotations']
@@ -67,17 +73,36 @@ export class KubeConfigurationApplier implements IConfigurationApplier
         const deploymentPath = KubeResourceCatalog.PathOf(K.DeploymentType, target.Namespace, target.Deployment)
         const previous = await this.client.Get(configMapPath) as ObjectShape | undefined
         const deployment = await this.client.Get(deploymentPath) as DeploymentShape | undefined
-        const previousHash = deployment?.spec?.template?.metadata?.annotations?.[AppliedConfigurationKeys.HashAnnotation]
+        const previousAnnotations = deployment?.spec?.template?.metadata?.annotations
+        const previousHash = previousAnnotations?.[AppliedConfigurationKeys.HashAnnotation]
+        const previousRevision = previousAnnotations?.[AppliedConfigurationKeys.SecretsRevisionAnnotation]
+        const revision = await this.SecretsRevision(applied, target)
         const configMap = AppliedConfigurationCodec.ToConfigMap(applied, target.Namespace) as unknown as Record<string, unknown>
         const written = this.self?.Is(target) === true ? this.self.WithPrevious(configMap, previous, typeof previousHash === 'string' ? previousHash : undefined) : configMap
-        await this.client.Apply(configMapPath, written)
-        await this.client.Patch(deploymentPath, K.HashPatch(applied.ContentHash()), KubeContentType.StrategicMerge)
+        await this.client.Apply(configMapPath, written, K.FieldManager)
+        try
+        {
+            await this.client.Patch(deploymentPath, K.HashPatch(applied.ContentHash(), revision), KubeContentType.StrategicMerge)
+        }
+        catch (refused)
+        {
+            // The new file must not wait for the next restart: put the previous one back, then report the refusal.
+            await this.Restore(configMapPath, previous).catch(() => undefined)
+            throw refused
+        }
         if (await this.watch.Await(target, this.timeoutMs) === RolloutState.Ready)
         {
             return ConfigurationApplyResult.Applied
         }
-        await this.Restore(configMapPath, previous)
-        await this.client.Patch(deploymentPath, K.HashPatch(typeof previousHash === 'string' ? previousHash : null), KubeContentType.StrategicMerge)
+        try
+        {
+            await this.Restore(configMapPath, previous)
+        }
+        finally
+        {
+            // The old template comes back even when the file cannot be restored.
+            await this.client.Patch(deploymentPath, K.HashPatch(typeof previousHash === 'string' ? previousHash : null, typeof previousRevision === 'string' ? previousRevision : null), KubeContentType.StrategicMerge)
+        }
         return ConfigurationApplyResult.Reverted
     }
 
@@ -104,13 +129,31 @@ export class KubeConfigurationApplier implements IConfigurationApplier
             [K.KindKey]: K.ConfigMapType.kind,
             [K.MetadataKey]: metadata,
             [K.DataKey]: previous.data ?? {},
-        })
+        }, K.FieldManager)
     }
 
-    // null removes the annotation (strategic merge), for a Deployment that had no configuration before.
-    private static HashPatch(hash: string | null): object
+    // The component's secrets Secret as it is now (its resourceVersion changes with every write), or null when it cannot be read.
+    private async SecretsRevision(applied: AppliedConfiguration, target: ApplyTarget): Promise<string | null>
     {
         const K = KubeConfigurationApplier
-        return { [K.SpecKey]: { [K.TemplateKey]: { [K.MetadataKey]: { [K.AnnotationsKey]: { [AppliedConfigurationKeys.HashAnnotation]: hash } } } } }
+        try
+        {
+            const path = KubeResourceCatalog.PathOf(K.SecretType, target.Namespace, ComponentConfigurationMounts.SecretNameOf(applied.Component))
+            const secret = await this.client.Get(path) as SecretShape | undefined
+            const revision = secret?.metadata?.resourceVersion
+            return typeof revision === 'string' ? revision : null
+        }
+        catch
+        {
+            return null
+        }
+    }
+
+    // null removes an annotation (strategic merge), for a Deployment that had no configuration or no secret before.
+    private static HashPatch(hash: string | null, revision: string | null): object
+    {
+        const K = KubeConfigurationApplier
+        const annotations = { [AppliedConfigurationKeys.HashAnnotation]: hash, [AppliedConfigurationKeys.SecretsRevisionAnnotation]: revision }
+        return { [K.SpecKey]: { [K.TemplateKey]: { [K.MetadataKey]: { [K.AnnotationsKey]: annotations } } } }
     }
 }

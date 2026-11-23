@@ -4,16 +4,17 @@ import { TenantRoles } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 /**
  * The component descriptor of the tenant admin image (pragmatic-tenant-admind, the console that ships into a client hive):
  * the `TenantAdminEnv` contract as `TenantAdminServer`, `InjectedIdpService` and `IngressTlsPolicy` read it. Stores in
- * Postgres (A5). Settings that bind the console to the platform or to its trust roots (the rollout link and its token, the
- * injected IdP, the release descriptors, keys and registry) are the platform's, injected by the hive manifests: they are
- * left out of the descriptor, so no tenant configuration can set them. Declares its application role (`environment-admin`; the tenant role `admin` is the realm's own). Its port is
- * configuration with no default; 7100 is the port the console installer gives it in a hive.
+ * Postgres (A5). Settings that bind the console to the platform, to its trust roots or to its own storage (the rollout link
+ * and its token, the injected IdP, the release descriptors, keys and registry, the state folder and the database URL) are the platform's, injected by the hive manifests: they are
+ * left out of the descriptor, so no tenant configuration can set them. Declares its application role (`environment-admin`; the tenant role `admin` is the realm's own). The port and base domain
+ * have no default and are injected by the hive manifests (7100 is the port the console installer gives it), so a configuration
+ * names them only to change them.
  */
 export class TenantAdminComponent
 {
     public static readonly Name = 'pragmatic-tenant-admin'
     /** The descriptor version: this application's package version (the release test pins it to package.json). */
-    public static readonly Version = '0.1.1'
+    public static readonly Version = '0.1.2'
 
     /** The declaration: the descriptor, and the variable the start step overlays each configured setting onto. */
     public static readonly Declaration: ComponentDeclaration = {
@@ -24,11 +25,9 @@ export class TenantAdminComponent
                 name: 'core',
                 description: 'The tenant console: listener, state folder and tenant origins.',
                 settings: [
-                    { name: 'dataRoot', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_DATA_ROOT', required: true, description: 'The state folder: master.key (seals the stored secrets) and the platform delivery (seed, verified images).' },
-                    { name: 'databaseUrl', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_DATABASE_URL_FILE', required: true, secret: true, description: 'The console Postgres URL (a mounted secret file); every record of the console lives there.' },
                     { name: 'portalDir', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_PORTAL_DIR', description: 'The tenant portal bundle (defaults to the shipped admin/tenant-portal/dist).' },
-                    { name: 'port', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_PORT', required: true, description: 'Port of the tenant listener.' },
-                    { name: 'baseDomain', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_BASE_DOMAIN', required: true, description: 'Tenants are served at <tenant>.<baseDomain>.' },
+                    { name: 'port', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_PORT', description: 'Port of the tenant listener.' },
+                    { name: 'baseDomain', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_BASE_DOMAIN', description: 'Tenants are served at <tenant>.<baseDomain>.' },
                     { name: 'bind', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_BIND', default: '127.0.0.1', description: 'Address of the tenant listener.' },
                     { name: 'externalScheme', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_EXTERNAL_SCHEME', default: 'https', description: 'Scheme browsers use for tenant origins.' },
                     { name: 'externalPort', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_EXTERNAL_PORT', description: 'Port browsers use for tenant origins, when not the scheme default.' },
@@ -38,6 +37,7 @@ export class TenantAdminComponent
                     { name: 'healthProbeMs', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS', default: 30000, description: 'Interval of environment health probes, in milliseconds.' },
                     { name: 'healthProbeTimeoutMs', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_TIMEOUT_MS', default: 60000, description: 'Timeout of one environment health probe, in milliseconds.' },
                     { name: 'consoleHost', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_CONSOLE_HOST', description: 'Browser host the console is served on through its Ingress.' },
+                    { name: 'desktopRealmSignIn', type: SettingType.Boolean, source: 'PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN', description: 'Whether desktop apps sign in through the realm (unset keeps the default of the console: on when the realm sign-in service is co-hosted).' },
                     { name: 'fingerprintKey', type: SettingType.String, source: 'PRAGMATIC_TENANT_ADMIN_FINGERPRINT_KEY_FILE', secret: true, description: 'The account-email fingerprint key (a mounted secret file).' },
                 ],
             },

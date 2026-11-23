@@ -1,26 +1,12 @@
 {
   "schema": 1,
   "component": "pragmatic-tenant-admin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "options": [
     {
       "name": "core",
       "description": "The tenant console: listener, state folder and tenant origins.",
       "settings": [
-        {
-          "name": "dataRoot",
-          "type": "string",
-          "required": true,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_DATA_ROOT: The state folder: master.key (seals the stored secrets) and the platform delivery (seed, verified images)."
-        },
-        {
-          "name": "databaseUrl",
-          "type": "string",
-          "required": true,
-          "secret": true,
-          "description": "PRAGMATIC_TENANT_ADMIN_DATABASE_URL_FILE: The console Postgres URL (a mounted secret file); every record of the console lives there."
-        },
         {
           "name": "portalDir",
           "type": "string",
@@ -31,14 +17,14 @@
         {
           "name": "port",
           "type": "integer",
-          "required": true,
+          "required": false,
           "secret": false,
           "description": "PRAGMATIC_TENANT_ADMIN_PORT: Port of the tenant listener."
         },
         {
           "name": "baseDomain",
           "type": "string",
-          "required": true,
+          "required": false,
           "secret": false,
           "description": "PRAGMATIC_TENANT_ADMIN_BASE_DOMAIN: Tenants are served at <tenant>.<baseDomain>."
         },
@@ -111,6 +97,13 @@
           "required": false,
           "secret": false,
           "description": "PRAGMATIC_TENANT_ADMIN_CONSOLE_HOST: Browser host the console is served on through its Ingress."
+        },
+        {
+          "name": "desktopRealmSignIn",
+          "type": "boolean",
+          "required": false,
+          "secret": false,
+          "description": "PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN: Whether desktop apps sign in through the realm (unset keeps the default of the console: on when the realm sign-in service is co-hosted)."
         },
         {
           "name": "fingerprintKey",

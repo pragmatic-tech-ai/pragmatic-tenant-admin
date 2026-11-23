@@ -19,6 +19,7 @@ import { TenantAdminComponent } from './tenant-admin-component.js'
 import { SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { ConsoleStartFallback } from './configuration/console-start-fallback.js'
 import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
+import { ReleaseDescriptorCatalogue } from './configuration/release-descriptor-catalogue.js'
 
 export type TenantAdminConfig = {
     readonly dataRoot: string
@@ -407,7 +408,11 @@ export class TenantAdminServer
         const cfg = composition.config
         // An apply the console made to itself ended with its restart: complete it by what this console runs, before any
         // new apply can begin.
-        await composition.selfApply?.Settle(await composition.database.Configuration(), composition.directory.Tenant.id)
+        const repository = await composition.database.Configuration()
+        const tenantId = composition.directory.Tenant.id
+        await composition.selfApply?.Settle(repository, tenantId)
+            .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
+        await composition.selfApply?.SettleInterrupted(repository, tenantId, ReleaseDescriptorCatalogue.HiveComponents)
             .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
         try
         {

@@ -160,6 +160,31 @@ describe('ConfigurationService', () =>
         assert.equal((await service.Apply(F.Tenant, F.Server, 1, 'dev2', F.Admin)).detail, ConfigurationService.UnverifiedTargetDetail, 'a development image is applied unverified, and says so')
     })
 
+    it('refuses an apply to a Deployment another component is already rolling (two components share the env server)', async () =>
+    {
+        const releases: Array<() => void> = []
+        let entered: () => void = () => undefined
+        const waiting = new Promise<void>(resolve => { entered = resolve })
+        const slow: IConfigurationApplier = {
+            Available: true,
+            Apply: () => new Promise<ConfigurationApplyResult>(resolve => { releases.push(() => resolve(ConfigurationApplyResult.Applied)); entered() }),
+        }
+        const shared = 'pragmatic-env-dev1-server'
+        const targets = new FixedTargets(new Map([
+            [F.Server, [F.Target('dev1', 'pragmatic-env-dev1', shared)]],
+            [F.Agent, [F.Target('dev1', 'pragmatic-env-dev1', shared)]],
+        ]))
+        const catalogue = new ReleaseDescriptorCatalogue(F.Mounted(), TenantAdminComponent.Descriptor(), F.Registry(), ['0.2.0'])
+        const service = new ConfigurationService(new InMemoryConfigurationRepository(), catalogue, targets, slow, new RecordingSecrets())
+        await service.Save(F.Tenant, F.Server, 0, ConfigFixture.Document, F.Admin, '')
+        await service.Save(F.Tenant, F.Agent, 0, ConfigFixture.Document, F.Admin, '')
+        const first = service.Apply(F.Tenant, F.Server, 1, 'dev1', F.Admin)
+        await waiting
+        await assert.rejects(service.Apply(F.Tenant, F.Agent, 1, 'dev1', F.Admin), ConfigurationApplyInProgressError)
+        releases.forEach(release => release())
+        await first
+    })
+
     it('refuses a second apply to a target while the first one waits for its roll', async () =>
     {
         const releases: Array<() => void> = []

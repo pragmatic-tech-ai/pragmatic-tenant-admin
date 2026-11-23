@@ -8,6 +8,7 @@ import { ConsoleSelfApply } from '../console-self-apply.js'
 import { ConsoleStartFallback, type IConsoleRevert } from '../console-start-fallback.js'
 import { KubeConfigurationApplier } from '../kube-configuration-applier.js'
 import { RolloutWatch } from '../rollout-watch.js'
+import { ConfigurationFixture } from './configuration-fixture.js'
 import { FakeClock, FakeCluster } from './fake-cluster.js'
 
 type Obj = Record<string, any>
@@ -149,6 +150,47 @@ describe('ConsoleSelfApply', () =>
         assert.equal(after.data['previous.json'], undefined, 'a later, unrelated start failure has nothing to revert to')
         assert.equal(after.metadata.annotations['pragmatic-tech.ai/previous-configuration-hash'], undefined)
         assert.equal(await W.SelfApply(cluster).Revert(), false)
+    })
+})
+
+class FailingCompletion extends InMemoryConfigurationRepository
+{
+    public override async CompleteApply(...args: Parameters<InMemoryConfigurationRepository['CompleteApply']>): Promise<never>
+    {
+        throw new Error('the repository is down')
+    }
+}
+
+describe('ConsoleSelfApply settling under failure and interruption', () =>
+{
+    it('forgets what it kept even when completing the apply fails, so a later refusal cannot undo a good apply', async () =>
+    {
+        const W = SelfWorld
+        const repository = new FailingCompletion()
+        const scope = new ConfigurationScope('acme', TenantAdminComponent.Name)
+        await repository.Save(new ConfigurationSaveRequest(scope, 0, { options: { ingressTls: { source: 'development' } } }, TenantAdminComponent.Descriptor(), 'a', ''))
+        await repository.BeginApply(new ApplyRequest(scope, 1, W.Self, 'a'))
+        const cluster = W.Cluster(W.Applied(1, 7100))
+        cluster.Objects.get(W.ConfigMapPath)!.data['previous.json'] = 'x'
+        await assert.rejects(W.SelfApply(cluster).Settle(repository, 'acme'), /repository is down/)
+        assert.equal(cluster.Objects.get(W.ConfigMapPath)!.data['previous.json'], undefined)
+        assert.equal(await W.SelfApply(cluster).Revert(), false)
+    })
+
+    it('an apply to another component that the restart interrupted is failed as interrupted, never left pending; the console own is left to Settle', async () =>
+    {
+        const W = SelfWorld
+        const repository = new InMemoryConfigurationRepository()
+        const agent = new ConfigurationScope('acme', 'pragmatic-hive-agent')
+        const own = new ConfigurationScope('acme', TenantAdminComponent.Name)
+        await repository.Save(new ConfigurationSaveRequest(agent, 0, { options: { core: { pollIntervalMs: 15000 } } }, ConfigurationFixture.Agent010(), 'a', ''))
+        await repository.Save(new ConfigurationSaveRequest(own, 0, { options: { ingressTls: { source: 'development' } } }, TenantAdminComponent.Descriptor(), 'a', ''))
+        const other = await repository.BeginApply(new ApplyRequest(agent, 1, new ApplyTarget('h1', 'pragmatic-system', 'pragmatic-hive-agent-h1'), 'a'))
+        const mine = await repository.BeginApply(new ApplyRequest(own, 1, W.Self, 'a'))
+        await W.SelfApply(W.Cluster(W.Applied(1, 7100))).SettleInterrupted(repository, 'acme', ['pragmatic-hive-agent', TenantAdminComponent.Name])
+        const settled = (await repository.Applies(agent)).find(a => a.Id === other.Id)
+        assert.deepEqual([settled?.Outcome, settled?.Detail], [ApplyOutcome.Failed, ConsoleSelfApply.InterruptedDetail])
+        assert.equal((await repository.Applies(own)).find(a => a.Id === mine.Id)?.Outcome, ApplyOutcome.Pending)
     })
 })
 

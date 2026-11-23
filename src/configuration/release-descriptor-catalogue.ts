@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ComponentDescriptor } from '@pragmatic-tech-ai/pragmatic-component'
 import { ComponentDescriptorSet, ReleaseApp, ReleaseDescriptorsAbsentError } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import { DescriptorUnavailableError, type IComponentDescriptorSource } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
@@ -30,6 +31,7 @@ export class ReleaseDescriptorCatalogue implements IComponentDescriptorSource
         ReleaseApp.EnvServer, ReleaseApp.EnvGateway, ReleaseApp.HiveAgent, ReleaseApp.TenantAdmin, ReleaseApp.TenantIdp, ReleaseApp.UiUnpack,
     ]
     public static readonly DefaultDirectory = '/etc/pragmatic/descriptors'
+    private static readonly DigestsFile = 'digests.json'
 
     private readonly current = new Map<string, ComponentDescriptor>()
     private readonly fetched = new Map<string, ComponentDescriptorSet>()
@@ -49,10 +51,11 @@ export class ReleaseDescriptorCatalogue implements IComponentDescriptorSource
         this.current.set(own.Name, own)
     }
 
-    /** The catalogue over the mounted directory `dir` (absent: none mounted). */
+    /** The catalogue over the mounted directory `dir` (absent or empty: none mounted). */
     public static FromDirectory(dir: string, own: ComponentDescriptor, registry: IReleaseDescriptorReader | undefined, releases: readonly string[]): ReleaseDescriptorCatalogue
     {
-        const mounted = existsSync(dir) ? ComponentDescriptorSet.FromDirectory(dir) : undefined
+        // An optional ConfigMap volume that is absent still mounts an empty directory: no digests file, no mounted set.
+        const mounted = existsSync(join(dir, ReleaseDescriptorCatalogue.DigestsFile)) ? ComponentDescriptorSet.FromDirectory(dir) : undefined
         return new ReleaseDescriptorCatalogue(mounted, own, registry, releases)
     }
 
@@ -70,11 +73,25 @@ export class ReleaseDescriptorCatalogue implements IComponentDescriptorSource
     {
         const current = this.current.get(component)
         if (current !== undefined && current.Version === componentVersion) return current
+        let unreadable: DescriptorUnavailableError | undefined
         for (const release of this.releases)
         {
-            const descriptor = (await this.ReleaseSet(component, componentVersion, release)).Get(component)
+            let set: ComponentDescriptorSet
+            try
+            {
+                set = await this.ReleaseSet(component, componentVersion, release)
+            }
+            catch (error)
+            {
+                // One release out of reach must not hide a version an older adopted release carries.
+                if (!(error instanceof DescriptorUnavailableError)) throw error
+                unreadable = error
+                continue
+            }
+            const descriptor = set.Get(component)
             if (descriptor !== undefined && descriptor.Version === componentVersion) return descriptor
         }
+        if (unreadable !== undefined) throw unreadable
         return undefined
     }
 
