@@ -10,6 +10,7 @@ import { LabelConfigurationTargets, type IConfiguredNamespaces } from './label-c
 import { ReleaseDescriptorCatalogue, type IReleaseDescriptorReader } from './release-descriptor-catalogue.js'
 import { RolloutWatch } from './rollout-watch.js'
 import { ConsoleSelfApply } from './console-self-apply.js'
+import { ConfigurationPreparer } from './configuration-preparer.js'
 
 /** The environment records the console's environment namespaces are read from. */
 export interface IEnvironmentList
@@ -92,6 +93,15 @@ export class NoConfigurationTargets implements IConfigurationTargetSource
     }
 }
 
+/** The console's configuration service and the preparer it runs at start (undefined outside a cluster). */
+export class ComposedConsoleConfiguration
+{
+    public constructor(public readonly Service: ConfigurationService, public readonly Preparer: ConfigurationPreparer | undefined)
+    {
+        Object.freeze(this)
+    }
+}
+
 /** What the console's configuration is composed from. */
 export interface ConsoleConfigurationParts
 {
@@ -126,16 +136,23 @@ export class ConsoleConfiguration
 
     public static Compose(parts: ConsoleConfigurationParts): ConfigurationService
     {
+        return ConsoleConfiguration.Build(parts).Service
+    }
+
+    /** The service and, inside a cluster, the preparer the console runs at start (ConfigurationPreparer). */
+    public static Build(parts: ConsoleConfigurationParts, log: (line: string) => void = () => undefined): ComposedConsoleConfiguration
+    {
         const C = ConsoleConfiguration
         const env = parts.Env
         const catalogue = ReleaseDescriptorCatalogue.FromDirectory(C.DescriptorsDirOf(env), TenantAdminComponent.Descriptor(), C.RegistryOf(env), C.ReleasesOf(env))
         if (parts.Client === undefined)
         {
-            return new ConfigurationService(parts.Repository, catalogue, new NoConfigurationTargets(), new UnavailableConfigurationApplier(), new UnavailableComponentSecretWriter())
+            return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, new NoConfigurationTargets(), new UnavailableConfigurationApplier(), new UnavailableComponentSecretWriter()), undefined)
         }
         const targets = new LabelConfigurationTargets(parts.Client, new ConsoleConfiguredNamespaces(parts.HiveId, parts.TenantId, parts.Environments), new ImageComponentDigests(), catalogue)
         const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, C.SelfOf(parts.Client, parts.TenantId, parts.HiveId))
-        return new ConfigurationService(parts.Repository, catalogue, targets, applier, new ComponentSecretWriter(parts.Client))
+        const preparer = new ConfigurationPreparer(parts.Client, parts.Repository, catalogue, targets, log)
+        return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, targets, applier, new ComponentSecretWriter(parts.Client), preparer), preparer)
     }
 
     /** The console's own Deployment, as its configuration target. */

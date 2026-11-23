@@ -1,4 +1,4 @@
-import { ApplyOutcome, AppliedConfigurationKeys, ConfigurationScope, type ApplyTarget, type IConfigurationRepository } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ApplyOutcome, AppliedConfigurationEntries, AppliedConfigurationKeys, ConfigurationPreparationStatus, ConfigurationScope, type ApplyTarget, type IConfigurationRepository } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeContentType, KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { KubeConfigurationApplier } from './kube-configuration-applier.js'
@@ -91,6 +91,12 @@ export class ConsoleSelfApply
         // The template first: a pod started from it reads whatever file is there, and the file below follows at once.
         await this.client.Patch(this.DeploymentPath(), S.HashPatch(typeof hash === 'string' && hash !== S.NoText ? hash : null), KubeContentType.StrategicMerge)
         const data: Record<string, string> = previous === S.NoText ? {} : { [AppliedConfigurationKeys.FileName]: previous }
+        // The entries prepared for the next release stay, with their status: they are about other descriptors (R3).
+        for (const [key, value] of Object.entries(current.data ?? {}))
+        {
+            if (AppliedConfigurationEntries.DigestOfKey(key) !== undefined && typeof value === 'string') data[key] = value
+        }
+        const annotations = ConfigurationPreparationStatus.Of(current.metadata?.annotations).Over(S.KeptAnnotations(current.data?.[S.PreviousAnnotationsKey]))
         await this.client.Apply(path, {
             [S.ApiVersionKey]: S.ConfigMapType.apiVersion,
             [S.KindKey]: S.ConfigMapType.kind,
@@ -98,7 +104,7 @@ export class ConsoleSelfApply
                 [S.NameKey]: current.metadata?.name,
                 [S.NamespaceKey]: current.metadata?.namespace,
                 [S.LabelsKey]: current.metadata?.labels,
-                [S.AnnotationsKey]: S.KeptAnnotations(current.data?.[S.PreviousAnnotationsKey]),
+                [S.AnnotationsKey]: annotations,
             },
             [S.DataKey]: data,
         }, KubeConfigurationApplier.FieldManager)

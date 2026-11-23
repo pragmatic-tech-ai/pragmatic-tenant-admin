@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { AppliedConfiguration, AppliedConfigurationCodec, ApplyOutcome, ApplyRequest, ApplyTarget, ConfigurationSaveRequest, ConfigurationScope, ConfigurationStartError, ConfigurationStartReason, InMemoryConfigurationRepository, type IStartProcess } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEntries, ConfigurationPreparationStatus, ApplyOutcome, ApplyRequest, ApplyTarget, ConfigurationSaveRequest, ConfigurationScope, ConfigurationStartError, ConfigurationStartReason, InMemoryConfigurationRepository, type IStartProcess } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeApiClient, KubeMethod } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationApplyResult, ConfigurationService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../../tenant-admin-component.js'
@@ -239,5 +242,51 @@ describe('ConsoleStartFallback', () =>
         assert.equal(ConsoleStartFallback.DeploymentOf({ PRAGMATIC_TENANT_ADMIN_DEPLOYMENT: 'Not A Name' }), undefined)
         assert.equal(ConsoleStartFallback.InCluster({ PRAGMATIC_TENANT_ADMIN_DEPLOYMENT: 'x' }), undefined, 'outside a pod there is nothing to put back')
         assert.equal(ConfigurationApplyResult.Reverted, 'reverted')
+    })
+})
+
+describe('ConsoleSelfApply and prepared entries', () =>
+{
+    it('putting back what ran before keeps the entries prepared for the next release', async () =>
+    {
+        const W = SelfWorld
+        const good = W.Applied(1, 7100)
+        const bad = W.Applied(2, 1)
+        const cluster = W.Cluster(good)
+        const client = new KubeApiClient(cluster)
+        const nextDigest = `sha256:${'f'.repeat(64)}`
+        const next = new AppliedConfiguration('acme', good.Component, 3, '9.9.9', nextDigest, { options: {} })
+        cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(cluster.Objects.get(W.ConfigMapPath) as never, next) as Obj)
+        cluster.Readies = () => false
+        const applier = new KubeConfigurationApplier(client, new RolloutWatch(client, new FakeClock()), 0, W.SelfApply(cluster))
+        await applier.Apply(bad, W.Self).catch(() => undefined)
+        // The new console refuses its start: the revert keeps the prepared entry and its mark.
+        const map = cluster.Objects.get(W.ConfigMapPath)!
+        map.data['configuration.json'] = bad.ToCanonicalJson()
+        map.data['previous.json'] = good.ToCanonicalJson()
+        assert.equal(await W.SelfApply(cluster).Revert(), true)
+        const restored = cluster.Objects.get(W.ConfigMapPath)!
+        assert.equal(AppliedConfigurationCodec.FromConfigMap(restored).Version, 1)
+        assert.deepEqual([...AppliedConfigurationEntries.Prepared(restored).keys()], [nextDigest])
+        assert.ok(ConfigurationPreparationStatus.Of(restored.metadata.annotations).IsPrepared(nextDigest))
+    })
+
+    it('the console starts on a configuration applied for its previous descriptor that validates against its own', async () =>
+    {
+        const folder = await mkdtemp(join(tmpdir(), 'console-revalidate-'))
+        try
+        {
+            const own = TenantAdminComponent.Descriptor()
+            const applied = new AppliedConfiguration('acme', own.Name, 3, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 7443 } } })
+            const path = join(folder, 'configuration.json')
+            await writeFile(path, applied.ToCanonicalJson())
+            const env: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path }
+            const port = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, new ExitRecorder())
+            assert.equal(port, '7443', 'the re-validated document was overlaid')
+        }
+        finally
+        {
+            await rm(folder, { recursive: true, force: true })
+        }
     })
 })

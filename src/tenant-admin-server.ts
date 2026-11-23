@@ -18,6 +18,7 @@ import { ConsoleConfiguration } from './configuration/console-configuration.js'
 import { TenantAdminComponent } from './tenant-admin-component.js'
 import { SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { ConsoleStartFallback } from './configuration/console-start-fallback.js'
+import type { ConfigurationPreparer } from './configuration/configuration-preparer.js'
 import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
 import { ReleaseDescriptorCatalogue } from './configuration/release-descriptor-catalogue.js'
 
@@ -55,6 +56,8 @@ type AdvertSettings = {
 export type TenantAdminComposition = {
     /** The console as its own configuration target; undefined outside a pod. */
     readonly selfApply: ConsoleSelfApply | undefined
+    /** Prepares the configurations for the release's descriptors at start; undefined outside a pod. */
+    readonly preparer: ConfigurationPreparer | undefined
     readonly directory: SeededTenantDirectory
     readonly rollout: IRolloutClient
     readonly plane: TenantPlane
@@ -351,6 +354,12 @@ export class TenantAdminServer
         const relay = reach === undefined ? undefined : { endpoints: reach, audit: desktopAudit }
         const resolver = new TenantHostResolver(cfg.baseDomain, cfg.scheme, directory, cfg.externalPort, TenantAdminServer.ConsoleAliasOf(cfg, directory))
         const sessions = new TenantSessions(await db.SessionRepositories(), cfg.secureCookie)
+        // The console configures every hive component it finds by label, through its own cluster access; at start it prepares
+        // their configurations for the descriptors of the release it runs (ConfigurationPreparer).
+        const configuration = ConsoleConfiguration.Build({
+            Env: env, Repository: await db.Configuration(), Environments: registry, TenantId: tenant.id,
+            HiveId: TenantAdminServer.FirstHiveOf(directory).id, Client: inCluster?.client,
+        }, log)
         const plane = TenantPlaneComposer.BuildTenantPlane({
             Idp: idpService,
             Directory: directory,
@@ -368,11 +377,7 @@ export class TenantAdminServer
             EmailDomains: emailDomains,
             ConsoleTenantId: tenant.id,
             Graphs: graphs,
-            // The console configures every hive component it finds by label, through its own cluster access.
-            Configuration: ConsoleConfiguration.Compose({
-                Env: env, Repository: await db.Configuration(), Environments: registry, TenantId: tenant.id,
-                HiveId: TenantAdminServer.FirstHiveOf(directory).id, Client: inCluster?.client,
-            }),
+            Configuration: configuration.Service,
         })
         const selfApply = inCluster === undefined ? undefined : ConsoleConfiguration.SelfOf(inCluster.client, tenant.id, TenantAdminServer.FirstHiveOf(directory).id)
         const monitor = cfg.probeMs > 0
@@ -395,7 +400,7 @@ export class TenantAdminServer
         // and relays (the host has attached both to plane.principals above).
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
-        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply }
+        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer }
     }
 
     /**
@@ -430,6 +435,10 @@ export class TenantAdminServer
         this.running = composition
         this.ownsDatabase = database === undefined
         console.log(TenantAdminServer.ListeningLine(cfg))
+        // Serving first, then the configurations prepared for this release's descriptors: the platform's installer waits for
+        // their status before it rolls the components onto the release (one target failing is logged, never fatal).
+        await composition.preparer?.PrepareAll(tenantId)
+            .catch(err => log(TenantAdminServer.PrepareFailed + (err instanceof Error ? err.message : String(err))))
         await composition.advert?.Start()
         return composition
     }
@@ -516,6 +525,7 @@ export class TenantAdminServer
     }
 
     private static readonly SettleFailed = 'settling the console\'s own configuration apply failed: '
+    private static readonly PrepareFailed = 'preparing the configurations for this release failed: '
 
     private static Required(env: NodeJS.ProcessEnv, name: string): string
     {

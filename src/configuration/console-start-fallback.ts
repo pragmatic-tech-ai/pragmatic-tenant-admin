@@ -33,7 +33,8 @@ export class ConsoleStartFallback
         const F = ConsoleStartFallback
         try
         {
-            await ComponentStartConfiguration.Apply({ Declaration: declaration, Env: env })
+            // The console alone re-validates a configuration of its previous descriptor (it prepares everyone's entries, so nobody prepares its own).
+            await ComponentStartConfiguration.Apply({ Declaration: declaration, Env: env, Revalidate: true })
             return read(env)
         }
         catch (error)

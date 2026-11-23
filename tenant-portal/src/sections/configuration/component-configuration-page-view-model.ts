@@ -4,7 +4,8 @@ import { OptionViewModel } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantPageViewModel } from '../../shell/tenant-page-view-model.js'
 import type { TenantSessionService } from '../../shell/tenant-session-service.js'
 import { ConfigurationApplyDetails, ConfigurationApplyOutcome } from '../../tenant-types.js'
-import type { ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationDiffDto, ConfigurationTargetDto } from '../../tenant-types.js'
+import type { ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationDiffDto, ConfigurationPreparationDto, ConfigurationTargetDto } from '../../tenant-types.js'
+import { ConfigurationPreparationOutcome } from '../../tenant-types.js'
 import { ConfigurationEditorViewModel } from './configuration-editor-view-model.js'
 import type { IConfigurationNavigator } from './configuration-page-view-model.js'
 import { ConfigurationApplyRowViewModel, ConfigurationChangeRowViewModel, ConfigurationSettingRowViewModel, ConfigurationTargetRowViewModel, ConfigurationText, ConfigurationVersionRowViewModel } from './configuration-rows.js'
@@ -24,6 +25,17 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private static readonly HasVersionsProperty = 'HasVersions'
     private static readonly HasTargetsProperty = 'HasTargets'
     private static readonly HasAppliesProperty = 'HasApplies'
+    private static readonly PreparationTextProperty = 'PreparationText'
+    private static readonly HasPreparationsProperty = 'HasPreparations'
+    private static readonly PreparedPrefix = 'Ready for '
+    private static readonly RefusedPrefix = 'Not ready for '
+    private static readonly PreparationOn = ' on '
+    private static readonly PreparedSuffix = ': a version validated for it is prepared beside the running one.'
+    private static readonly RefusedChange = ': change '
+    private static readonly RefusedSuffix = ' before the platform rolls it out ('
+    private static readonly RefusedEnd = ').'
+    private static readonly SettingsJoin = ', '
+    private static readonly LineJoin = '\n'
     private static readonly HasNoSettingsProperty = 'HasNoSettings'
     private static readonly HasNoVersionsProperty = 'HasNoVersions'
     private static readonly HasNoTargetsProperty = 'HasNoTargets'
@@ -196,6 +208,18 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     public get HasApplies(): boolean
     {
         return this.applyRows.Count > 0
+    }
+
+    // How the configuration stands for the descriptors of the release the console runs, one line per target and descriptor.
+    public get PreparationText(): string
+    {
+        const P = ComponentConfigurationPageViewModel
+        return (this.detail?.preparations ?? []).map(p => P.PreparationLine(p)).join(P.LineJoin)
+    }
+
+    public get HasPreparations(): boolean
+    {
+        return (this.detail?.preparations ?? []).length > 0
     }
 
     // The version whose document is shown; '' while none is.
@@ -432,6 +456,7 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     {
         const P = ComponentConfigurationPageViewModel
         const before = [this.ComponentVersionText, this.HeadText, this.HasSettings, this.HasVersions, this.HasTargets, this.HasApplies] as const
+        const preparationBefore = [this.PreparationText, this.HasPreparations] as const
         this.detail = detail
         this.head = head
         const versions = [...detail.versions].sort((a, b) => b.version - a.version)
@@ -451,6 +476,8 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         this.RaiseIfChanged(P.HasVersionsProperty, before[3], this.HasVersions)
         this.RaiseIfChanged(P.HasTargetsProperty, before[4], this.HasTargets)
         this.RaiseIfChanged(P.HasAppliesProperty, before[5], this.HasApplies)
+        this.RaiseIfChanged(P.PreparationTextProperty, preparationBefore[0], this.PreparationText)
+        this.RaiseIfChanged(P.HasPreparationsProperty, preparationBefore[1], this.HasPreparations)
         this.RaiseIfChanged(P.HasNoSettingsProperty, !before[2], this.HasNoSettings)
         this.RaiseIfChanged(P.HasNoVersionsProperty, !before[3], this.HasNoVersions)
         this.RaiseIfChanged(P.HasNoTargetsProperty, !before[4], this.HasNoTargets)
@@ -629,6 +656,14 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         {
             this.RaisePropertyChanged(name, old, next)
         }
+    }
+
+    private static PreparationLine(p: ConfigurationPreparationDto): string
+    {
+        const P = ComponentConfigurationPageViewModel
+        const where = p.componentVersion + P.PreparationOn + p.environment
+        if (p.outcome === ConfigurationPreparationOutcome.Prepared) return P.PreparedPrefix + where + P.PreparedSuffix
+        return P.RefusedPrefix + where + P.RefusedChange + p.settings.join(P.SettingsJoin) + P.RefusedSuffix + p.reason + P.RefusedEnd
     }
 
     private static HeadOf(detail: ConfigurationComponentDetailDto): number | null

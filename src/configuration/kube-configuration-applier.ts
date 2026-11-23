@@ -1,4 +1,4 @@
-import { AppliedConfigurationCodec, AppliedConfigurationKeys, type AppliedConfiguration, type ApplyTarget } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { AppliedConfigurationCodec, AppliedConfigurationEntries, AppliedConfigurationKeys, ConfigurationPreparationStatus, type AppliedConfiguration, type ApplyTarget, type IAppliedConfigMap } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeContentType, KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ComponentConfigurationMounts, ConfigurationApplyResult, type IConfigurationApplier } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import type { ConsoleSelfApply } from './console-self-apply.js'
@@ -16,7 +16,9 @@ type SecretShape = { metadata?: { resourceVersion?: unknown } }
  * 2. writes the new ConfigMap (server-side apply under the configuration field manager, created or updated in place under
  *    the same name) and the new content hash on the pod template (a strategic-merge patch), which rolls the Deployment
  *    when the content changed; beside it, the revision of the component's secrets Secret, so a secret written since the
- *    last apply rolls the Deployment even for the same version (a component reads its secret files at start only);
+ *    last apply rolls the Deployment even for the same version (a component reads its secret files at start only); the
+ *    entries prepared beside the old file for other descriptors (ConfigurationPreparer) are kept, the one for the
+ *    applied descriptor dropped (the new file serves it);
  * 3. waits up to RolloutTimeoutMs for the roll (RolloutWatch). A surge-rolled workload (the hive agent,
  *    `maxUnavailable: 0`) keeps its old pod serving until a new one is ready; a recreated one (the console, the realm
  *    sign-in service, the env server: one writer on their data) is down while its new pod starts, at most until the
@@ -77,7 +79,7 @@ export class KubeConfigurationApplier implements IConfigurationApplier
         const previousHash = previousAnnotations?.[AppliedConfigurationKeys.HashAnnotation]
         const previousRevision = previousAnnotations?.[AppliedConfigurationKeys.SecretsRevisionAnnotation]
         const revision = await this.SecretsRevision(applied, target)
-        const configMap = AppliedConfigurationCodec.ToConfigMap(applied, target.Namespace) as unknown as Record<string, unknown>
+        const configMap = K.KeepPrepared(AppliedConfigurationCodec.ToConfigMap(applied, target.Namespace), previous, applied.DescriptorDigest) as unknown as Record<string, unknown>
         const written = this.self?.Is(target) === true ? this.self.WithPrevious(configMap, previous, typeof previousHash === 'string' ? previousHash : undefined) : configMap
         await this.client.Apply(configMapPath, written, K.FieldManager)
         try
@@ -147,6 +149,32 @@ export class KubeConfigurationApplier implements IConfigurationApplier
         {
             return null
         }
+    }
+
+    // The entries prepared for other descriptors (a release about to roll) stay beside the new file, with their status; the
+    // applied file now serves its own descriptor, so an entry or refusal for that one goes (R3). Entries that do not read
+    // are dropped (the console prepares them again at its next start).
+    private static KeepPrepared(next: IAppliedConfigMap, previous: ObjectShape | undefined, digest: string): IAppliedConfigMap
+    {
+        let entries: ReadonlyMap<string, AppliedConfiguration>
+        try
+        {
+            entries = AppliedConfigurationEntries.Prepared(previous)
+        }
+        catch
+        {
+            entries = new Map()
+        }
+        let out = next
+        for (const [entryDigest, entry] of entries)
+        {
+            if (entryDigest !== digest) out = AppliedConfigurationEntries.With(out, entry)
+        }
+        const refusals = ConfigurationPreparationStatus.Of(previous?.metadata?.annotations).Refusals.filter(r => r.DescriptorDigest !== digest)
+        let status = ConfigurationPreparationStatus.Of(out.metadata.annotations)
+        for (const refusal of refusals) status = status.WithRefusal(refusal)
+        out.metadata.annotations = status.Over(out.metadata.annotations)
+        return out
     }
 
     // null removes an annotation (strategic merge), for a Deployment that had no configuration or no secret before.

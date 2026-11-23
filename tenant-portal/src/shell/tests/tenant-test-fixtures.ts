@@ -6,7 +6,7 @@ import { DialogService, type DialogOptions } from '@pragmatic-tech-ai/mural/fram
 import { NavigationService } from '@pragmatic-tech-ai/mural/framework/shell/services/navigation-service.js'
 import { ApiError, type TenantApiClient } from '../../tenant-api-client.js'
 import { ConfigurationApplyOutcome, EnvStatus, EnvType, Template } from '../../tenant-types.js'
-import type { ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationOptionDto, ConfigurationTargetDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
+import type { ConfigurationPreparationDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationOptionDto, ConfigurationTargetDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
 import type { AdminCapabilitiesDto, AdminSnapshotDto, AdoptionLedgerDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveHealthDto, HiveRolloutDto, IssueTokenParams, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TeamMemberDto, TenantEvent, TenantProfileDto, TokenIssuedDto } from '../../tenant-types.js'
 import { AppSession, type IPageReloader } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { Signal } from '@pragmatic-tech-ai/todl-runtime'
@@ -179,6 +179,7 @@ export class FakeTenantApi
     public readonly ConfigurationDocuments = new Map<string, unknown[]>()
     public readonly ConfigurationTargets = new Map<string, ConfigurationTargetDto[]>()
     public readonly ConfigurationApplies = new Map<string, ConfigurationApplyDto[]>()
+    public readonly ConfigurationPreparations = new Map<string, ConfigurationPreparationDto[]>()
     public ConfigurationDiff: ConfigurationDiffDto = { from: 0, to: 1, changes: [] }
     public ApplyOutcome = ConfigurationApplyOutcome.Applied
     public ApplyDetail: string | null = null
@@ -217,6 +218,7 @@ export class FakeTenantApi
             options: this.ConfigurationOptions.get(component) ?? [],
             versions: documents.map((_, i) => this.Summary(i + 1)),
             applies: [...(this.ConfigurationApplies.get(component) ?? [])],
+            preparations: [...(this.ConfigurationPreparations.get(component) ?? [])],
         }
     }
 

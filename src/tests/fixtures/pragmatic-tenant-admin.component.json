@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "component": "pragmatic-tenant-admin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "options": [
     {
       "name": "core",

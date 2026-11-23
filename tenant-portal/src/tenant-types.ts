@@ -462,6 +462,22 @@ export type ConfigurationApplyDto = {
     detail: string | null
 }
 
+// How a component's configuration stands for the descriptor a new release brings; values match the server wire strings.
+export enum ConfigurationPreparationOutcome
+{
+    Prepared = 'prepared',
+    Refused = 'refused',
+}
+
+export type ConfigurationPreparationDto = {
+    environment: string
+    componentVersion: string
+    descriptorDigest: string
+    outcome: ConfigurationPreparationOutcome
+    settings: string[]
+    reason: string
+}
+
 export type ConfigurationComponentDetailDto = {
     component: string
     componentVersion: string
@@ -469,6 +485,8 @@ export type ConfigurationComponentDetailDto = {
     options: ConfigurationOptionDto[]
     versions: ConfigurationVersionSummaryDto[]
     applies: ConfigurationApplyDto[]
+    // Absent from a console before preparations existed.
+    preparations?: ConfigurationPreparationDto[]
 }
 
 export type ConfigurationVersionDto = ConfigurationVersionSummaryDto & { document: unknown }

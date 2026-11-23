@@ -24,6 +24,7 @@ The console's composition and its in-hive seams live here; the tenant plane it c
 | `src/configuration/label-configuration-targets.ts` | `LabelConfigurationTargets`: a component's Deployments by label, with the descriptor digest their image carries. |
 | `src/configuration/kube-configuration-applier.ts`, `rollout-watch.ts` | The watched apply: ConfigMap and hash, wait for the roll, revert when it never readies. |
 | `src/configuration/console-self-apply.ts`, `console-start-fallback.ts` | The console configuring itself: what ran before kept, put back by a start it refuses, the apply settled. |
+| `src/configuration/configuration-preparer.ts` | At start, each applied configuration re-validated against the descriptors of the release the console runs: prepared beside the running one (`configuration.json.sha256-<hex>`, adopted as a version) or refused naming the settings; the status on the ConfigMap is what the platform installer waits for. |
 | `src/configuration/component-secret-writer.ts` | `ComponentSecretWriter`: secret values into `pragmatic-secrets-<component>` of one target. |
 | `src/tenant-admin-component.ts` | `TenantAdminComponent`: the component descriptor (version = `package.json` version). |
 | `src/release-components.ts` | `Components`: the descriptor source the image build reads (`pragmatic-component-descriptors --components dist/release-components.js`). |

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { RelayCommand } from '@pragmatic-tech-ai/mural/runtime'
 import { ApiError } from '../../../tenant-api-client.js'
-import { ConfigurationApplyDetails, ConfigurationApplyOutcome, ConfigurationChangeKind } from '../../../tenant-types.js'
+import { ConfigurationApplyDetails, ConfigurationApplyOutcome, ConfigurationChangeKind, ConfigurationPreparationOutcome } from '../../../tenant-types.js'
 import { PageState } from '../../../shell/tenant-page-view-model.js'
 import { FakeTenantApi, TenantTestHost, TestRail, Tick } from '../../../shell/tests/tenant-test-fixtures.js'
 import { ContentHostService } from '@pragmatic-tech-ai/mural/framework/shell/services/content-host-service.js'
@@ -265,6 +265,22 @@ describe('ComponentConfigurationPageViewModel', () =>
         assert.deepEqual([row.OutcomeText, row.IsReverted, row.IsFailed], ['Reverted', true, true])
         assert.match(row.DetailText, /previous configuration is running again/)
         assert.deepEqual(page.TargetRows.ToArray().map(r => r.AppliedText), ['Nothing applied', 'Nothing applied'])
+    })
+
+    it('shows how the configuration was prepared for the release: ready, or the settings to change first', async () =>
+    {
+        const fx = new ConfigFixture()
+        fx.Api.ConfigurationPreparations.set('graph', [
+            { environment: 'production', componentVersion: '0.2.4', descriptorDigest: 'sha256:b', outcome: ConfigurationPreparationOutcome.Prepared, settings: [], reason: '' },
+            { environment: 'staging', componentVersion: '0.2.4', descriptorDigest: 'sha256:b', outcome: ConfigurationPreparationOutcome.Refused, settings: ['database.poolSize'], reason: '/options/database/poolSize is not a setting of this option' },
+        ])
+        const page = await fx.Component()
+        assert.equal(page.HasPreparations, true)
+        assert.equal(page.PreparationText, 'Ready for 0.2.4 on production: a version validated for it is prepared beside the running one.\n'
+            + 'Not ready for 0.2.4 on staging: change database.poolSize before the platform rolls it out (/options/database/poolSize is not a setting of this option).')
+        const plain = await new ConfigFixture().Component()
+        assert.equal(plain.HasPreparations, false)
+        assert.equal(plain.PreparationText, '')
     })
 
     it('shows the apply in progress and offers no second apply meanwhile', async () =>

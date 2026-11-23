@@ -256,6 +256,11 @@ resources ConfigurationResources {
                         }
                     }
 
+                    // Preparations: whether the configuration is ready for the descriptors of the release the console runs.
+                    Border [ Style = @TenantPanel, Visibility = $HasPreparations << ToVisibility ] {
+                        TextBlock [ Text = $PreparationText, Foreground = @StateWarningInk, TextWrapping = Wrap ]
+                    }
+
                     // Applies: newest first.
                     TextBlock [ Text = "Applies", Style = @TenantSectionCaption, Visibility = $HasApplies << ToVisibility ]
                     Border [ Style = @TenantPanel, Visibility = $HasApplies << ToVisibility ] {

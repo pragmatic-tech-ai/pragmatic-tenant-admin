@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { AppliedConfiguration, AppliedConfigurationCodec, ApplyTarget } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { AppliedConfiguration, AppliedConfigurationCodec, AppliedConfigurationEntries, ApplyTarget, ConfigurationPreparationStatus } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeApiClient, KubeContentType, KubeMethod, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationApplyResult } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../../tenant-admin-component.js'
@@ -179,5 +179,42 @@ describe('RolloutWatch', () =>
         const watch = new RolloutWatch(new KubeApiClient({ Send: async () => ({ status: 200, body: JSON.stringify({ metadata: { generation: 2 }, status: { observedGeneration: 1 } }) }) }), clock)
         assert.equal(await watch.Await(ApplyWorld.Target(), 10_000), RolloutState.NotReady)
         assert.ok(clock.Slept.every(ms => ms === RolloutWatch.PollMs))
+    })
+})
+
+describe('KubeConfigurationApplier and prepared entries', () =>
+{
+    it('an apply keeps the entries prepared for other descriptors and drops the one for its own descriptor', async () =>
+    {
+        const W = ApplyWorld
+        const previous = W.Applied(1, 7100)
+        const cluster = W.Cluster(previous)
+        const otherDigest = `sha256:${'d'.repeat(64)}`
+        const other = new AppliedConfiguration(F.Tenant, previous.Component, 2, '9.9.9', otherDigest, { options: {} })
+        const stale = W.Applied(2, 7200)
+        const map = cluster.Objects.get(W.ConfigMapPath) as Obj
+        const prepared = AppliedConfigurationEntries.With(AppliedConfigurationEntries.With(map as never, other), stale)
+        cluster.Objects.set(W.ConfigMapPath, prepared as Obj)
+        assert.equal(await W.Applier(cluster).Apply(W.Applied(3, 7300), W.Target()), ConfigurationApplyResult.Applied)
+        const written = cluster.Objects.get(W.ConfigMapPath) as Obj
+        const entries = AppliedConfigurationEntries.Prepared(written)
+        assert.deepEqual([...entries.keys()], [otherDigest], 'the entry for the next release stays; the stale one for this descriptor goes')
+        assert.equal(W.PortOf(cluster), 7300)
+        const status = ConfigurationPreparationStatus.Of(written.metadata.annotations)
+        assert.deepEqual(status.Prepared, [otherDigest])
+    })
+
+    it('a reverted apply puts the prepared entries back with the previous file', async () =>
+    {
+        const W = ApplyWorld
+        const previous = W.Applied(1, 7100)
+        const cluster = W.Cluster(previous)
+        const otherDigest = `sha256:${'e'.repeat(64)}`
+        const map = cluster.Objects.get(W.ConfigMapPath) as Obj
+        cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(map as never, new AppliedConfiguration(F.Tenant, previous.Component, 2, '9.9.9', otherDigest, { options: {} })) as Obj)
+        const bad = W.Applied(2, 1)
+        cluster.Readies = template => template.metadata?.annotations?.[W.Hash] !== bad.ContentHash()
+        assert.equal(await W.Applier(cluster).Apply(bad, W.Target()), ConfigurationApplyResult.Reverted)
+        assert.deepEqual([...AppliedConfigurationEntries.Prepared(cluster.Objects.get(W.ConfigMapPath)).keys()], [otherDigest])
     })
 })
