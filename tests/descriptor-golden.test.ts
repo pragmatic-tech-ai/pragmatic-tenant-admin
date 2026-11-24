@@ -12,7 +12,7 @@ import { TenantAdminComponent } from '../src/tenant-admin-component.js'
 class DescriptorGolden
 {
     /** src/tests/tenant-admin-component.test.ts pins the same digest. */
-    public static readonly Digest = 'sha256:71df3b1765405f841408d9ed4a0d7f9284850f8e48f0165511cb325485636fa1'
+    public static readonly Digest = 'sha256:c5ae13c755b3d9ee1496ac066a8791cc507948d5bac40bf292c8be247842e677'
     private static readonly Root = join(dirname(fileURLToPath(import.meta.url)), '..')
     public static readonly PackageJson = join(DescriptorGolden.Root, 'package.json')
     public static readonly Utf8 = 'utf8'

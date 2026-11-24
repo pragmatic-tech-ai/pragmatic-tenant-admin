@@ -103,6 +103,33 @@ export type RolloutEnvDto = { environmentName: string; runningImage: string | un
 
 export type HiveRolloutDto = { targetVersion: string | undefined; environments: RolloutEnvDto[] }
 
+// The levels "connect this hive" offers (Standalone never enrols; Hosted is the platform's own).
+export enum EnrolmentLevel
+{
+    Enrolled = 'enrolled',
+    Delegated = 'delegated',
+}
+
+// Where the console is reached, as the engine was installed (C3.3).
+export enum ConsoleAddressOptionDto
+{
+    OwnDomain = 'own-domain',
+    HiveSubdomain = 'hive-subdomain',
+    RelayedHiveSubdomain = 'relayed-hive-subdomain',
+}
+
+// A connected engine's enrolment: whether the hive is enrolled and as what, and how its console is reached.
+export type HiveEnrolmentDto = {
+    Enrolled: boolean
+    HiveId: string | null
+    Tenant: string | null
+    Level: string | null
+    ConsoleAddress: { Option: ConsoleAddressOptionDto; HostName: string; NeedsIngressAddress: boolean }
+}
+
+// What "connect this hive" sends: the one-time code, the level and (on the plain hive subdomain) the ingress address.
+export type EnrolHiveParams = { Code: string; Level: EnrolmentLevel; IngressAddress?: string }
+
 // One adoption-ledger entry as the tenant surface returns it (newest first); action is a plain string on the wire.
 export type AdoptionLedgerDto = { version: string; action: string; at: string; hiveId?: string }
 

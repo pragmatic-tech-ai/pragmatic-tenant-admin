@@ -27,6 +27,7 @@ import { RealmSecretsDatabase } from './environments/realm-secrets-database.js'
 import { EngineComposition } from './engine-composition.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
 import { EngineRolloutClient } from './tenant-api/engine-rollout-client.js'
+import { EngineConsoleHost } from './enrolment/engine-console-host.js'
 
 export type TenantAdminConfig = {
     readonly dataRoot: string
@@ -446,7 +447,7 @@ export class TenantAdminServer
         const advertSettings = TenantAdminServer.AdvertSettingsOf(env, cfg, log)
         const registration = await TenantAdminServer.RegistrationOf(await db.Map(R.Registration), advertSettings !== undefined, log)
         // No advert sender, no gate: nothing could ever lift a refusal.
-        const host = new TenantConsoleHost({
+        const hostOptions = {
             Plane: plane,
             Resolver: resolver,
             Service: service,
@@ -455,7 +456,10 @@ export class TenantAdminServer
             Registration: advertSettings === undefined ? undefined : registration,
             Audit: await db.Audit(),
             TrustedProxy: cfg.trustedProxy,
-        })
+        }
+        // A connected engine's console also serves "connect this hive" (C3.3), through its hive agent.
+        const enrolment = EngineConsoleHost.EnrolmentRoutesOf(env)
+        const host = enrolment === undefined ? new TenantConsoleHost(hostOptions) : new EngineConsoleHost(hostOptions, enrolment)
         // An operator Owner reset reaches this console in the advert answer; the follower then ends the Owner's sessions, sockets
         // and relays (the host has attached both to plane.principals above).
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))

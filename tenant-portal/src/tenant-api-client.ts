@@ -1,7 +1,7 @@
 import { ApiError, AppSessionClient, BrowserPage, type FetchFunction, type IPageLocation } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantShell } from './shell/tenant-shell.js'
 import { TenantEventType } from './tenant-types.js'
-import type { AdminSnapshotDto, AdoptionLedgerDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveHealthDto, HiveRolloutDto, IReleasesSource, IssueTokenParams, ISecurityModelSource, ITokensSource, IUsersAccessSource, IWebSocketFactory, IWebSocketLike, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TenantEvent, TeamMemberDto, TenantProfileDto, TokenIssuedDto } from './tenant-types.js'
+import type { AdminSnapshotDto, AdoptionLedgerDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnrolHiveParams, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveEnrolmentDto, HiveHealthDto, HiveRolloutDto, IReleasesSource, IssueTokenParams, ISecurityModelSource, ITokensSource, IUsersAccessSource, IWebSocketFactory, IWebSocketLike, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TenantEvent, TeamMemberDto, TenantProfileDto, TokenIssuedDto } from './tenant-types.js'
 
 // The shell's error type: thrown for every non-2xx tenant-surface answer, its message the server's error text.
 export { ApiError }
@@ -59,6 +59,8 @@ export class TenantApiClient extends AppSessionClient implements IReleasesSource
     private static readonly DomainsKey = 'domains'
     private static readonly DomainKey = 'domain'
     private static readonly HivesRoute = '/tenant-api/hives'
+    private static readonly EnrolmentRoute = '/tenant-api/hive/enrolment'
+    private static readonly EnrolRoute = '/tenant-api/hive/enrol'
     private static readonly EnvironmentsRoute = '/tenant-api/environments'
     private static readonly ManifestsRoute = '/tenant-api/manifests'
     private static readonly EventsRoute = '/tenant-api/events'
@@ -142,6 +144,18 @@ export class TenantApiClient extends AppSessionClient implements IReleasesSource
     public async ListManifests(): Promise<ManifestDto[]>
     {
         return await this.Get<ManifestDto[]>(TenantApiClient.ManifestsRoute)
+    }
+
+    // A connected engine's enrolment (404 on any other console: there is nothing to connect).
+    public async GetEnrolment(): Promise<HiveEnrolmentDto>
+    {
+        return await this.Get<HiveEnrolmentDto>(TenantApiClient.EnrolmentRoute)
+    }
+
+    // "Connect this hive" with the cabinet's one-time code (tenant role admin); a refusal is an ApiError with its code.
+    public async EnrolHive(params: EnrolHiveParams): Promise<HiveEnrolmentDto>
+    {
+        return await this.Post<HiveEnrolmentDto>(TenantApiClient.EnrolRoute, params)
     }
 
     public async GetRollout(hiveId: string): Promise<HiveRolloutDto>

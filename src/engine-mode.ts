@@ -27,6 +27,12 @@ export class EngineEnv
     public static readonly RealmSecretsRolesDir = 'PRAGMATIC_TENANT_ADMIN_REALM_SECRETS_ROLES_DIR'
     /** The environments' reader URL of the custom home, copied with the realm master key into every environment namespace. */
     public static readonly RealmSecretsReaderUrlFile = 'PRAGMATIC_TENANT_ADMIN_REALM_SECRETS_READER_URL_FILE'
+    /** The chart's `console.address` (own-domain, hive-subdomain, relayed-hive-subdomain): reported at enrolment (C3.3). */
+    public static readonly ConsoleAddress = 'PRAGMATIC_TENANT_ADMIN_CONSOLE_ADDRESS'
+    /** The hive agent's internal API (its ClusterIP Service, port 7210) the console asks to enrol (C3.3). */
+    public static readonly AgentUrl = 'PRAGMATIC_TENANT_ADMIN_AGENT_URL'
+    /** The console's projected service-account token for the audience `pragmatic-hive-agent` (C3.3). */
+    public static readonly AgentTokenFile = 'PRAGMATIC_TENANT_ADMIN_AGENT_TOKEN_FILE'
     private static readonly UnknownModePrefix = 'PRAGMATIC_ENGINE_MODE has an unknown value: '
     private static readonly Empty = ''
 

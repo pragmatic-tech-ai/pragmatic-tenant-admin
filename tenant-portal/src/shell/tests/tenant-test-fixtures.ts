@@ -5,9 +5,9 @@ import { ContentHostService } from '@pragmatic-tech-ai/mural/framework/shell/ser
 import { DialogService, type DialogOptions } from '@pragmatic-tech-ai/mural/framework/shell/services/dialog-service.js'
 import { NavigationService } from '@pragmatic-tech-ai/mural/framework/shell/services/navigation-service.js'
 import { ApiError, type TenantApiClient } from '../../tenant-api-client.js'
-import { ConfigurationApplyOutcome, EnvStatus, EnvType, Template } from '../../tenant-types.js'
+import { ConfigurationApplyOutcome, ConsoleAddressOptionDto, EnvStatus, EnvType, Template } from '../../tenant-types.js'
 import type { ConfigurationPreparationDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationOptionDto, ConfigurationTargetDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
-import type { AdminCapabilitiesDto, AdminSnapshotDto, AdoptionLedgerDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveHealthDto, HiveRolloutDto, IssueTokenParams, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TeamMemberDto, TenantEvent, TenantProfileDto, TokenIssuedDto } from '../../tenant-types.js'
+import type { AdminCapabilitiesDto, AdminSnapshotDto, AdoptionLedgerDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnrolHiveParams, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveEnrolmentDto, HiveHealthDto, HiveRolloutDto, IssueTokenParams, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TeamMemberDto, TenantEvent, TenantProfileDto, TokenIssuedDto } from '../../tenant-types.js'
 import { AppSession, type IPageReloader } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { Signal } from '@pragmatic-tech-ai/todl-runtime'
 import { TenantSessionService } from '../tenant-session-service.js'
@@ -427,6 +427,35 @@ export class FakeTenantApi
     {
         await this.Enter('ListManifests')
         return [...this.Manifests]
+    }
+
+    // A connected engine's enrolment (C3.3); undefined answers 404 (a console with nothing to connect).
+    public Enrolment: HiveEnrolmentDto | undefined
+    public readonly Enrolled: EnrolHiveParams[] = []
+
+    public async GetEnrolment(): Promise<HiveEnrolmentDto>
+    {
+        await this.Enter('GetEnrolment')
+        if (this.Enrolment === undefined)
+        {
+            throw new ApiError(ApiError.NotFoundStatus, 'Not found')
+        }
+        return { ...this.Enrolment }
+    }
+
+    public async EnrolHive(params: EnrolHiveParams): Promise<HiveEnrolmentDto>
+    {
+        await this.Enter('EnrolHive', params)
+        this.Enrolled.push(params)
+        const current = this.Enrolment ?? FakeTenantApi.NotEnrolled()
+        this.Enrolment = { ...current, Enrolled: true, HiveId: 'hvabcdefghij', Tenant: 'acme', Level: params.Level }
+        return { ...this.Enrolment }
+    }
+
+    // A connected engine before enrolment, reached on its own domain (or as given).
+    public static NotEnrolled(option: ConsoleAddressOptionDto = ConsoleAddressOptionDto.OwnDomain, host: string = 'console.acme.test'): HiveEnrolmentDto
+    {
+        return { Enrolled: false, HiveId: null, Tenant: null, Level: null, ConsoleAddress: { Option: option, HostName: host, NeedsIngressAddress: option === ConsoleAddressOptionDto.HiveSubdomain } }
     }
 
     public async GetRollout(hiveId: string): Promise<HiveRolloutDto>

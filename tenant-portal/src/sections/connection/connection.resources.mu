@@ -8,8 +8,44 @@
 
 import ConnectionPageViewModel from "./connection-page-view-model.js"
 import ConnectionEnvironmentRowViewModel from "./connection-page-view-model.js"
+import ConnectHiveViewModel from "./connect-hive-view-model.js"
 
 resources ConnectionResources {
+    // "Connect this hive": the cabinet's one-time code, the level and how the console is reached (C3.3).
+    DataTemplate [ DataType = ConnectHiveViewModel ] {
+        StackPanel [ Orientation = Vertical, Margin = (0,12,0,0) ] {
+            StackPanel [ Orientation = Vertical, Visibility = $ShowsForm << ToVisibility ] {
+                TextBlock [ Text = "One-time enrolment code", Style = @UiCaption, Foreground = @Fg2, Margin = (0,0,0,4) ]
+                TextBox [ UsesNativeInput = true, Text = $Code, Placeholder = "pe1-...", Margin = (0,0,0,4) ]
+                TextBlock [ Text = "From your Pragmatic account: Hives, Connect a hive. It is valid for 30 minutes and works once.",
+                            Style = @UiCaption, Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,0,0,12) ]
+                TextBlock [ Text = "Level", Style = @UiCaption, Foreground = @Fg2, Margin = (0,0,0,4) ]
+                ComboBox [ ItemsSource = $Levels, SelectedItem = $SelectedLevel, HorizontalAlignment = Stretch, Margin = (0,0,0,4) ]
+                TextBlock [ Text = $LevelHelp, Style = @UiCaption, Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,0,0,12) ]
+                TextBlock [ Text = "Console address", Style = @UiCaption, Foreground = @Fg2, Margin = (0,0,0,4) ]
+                TextBlock [ Text = $ConsoleAddressText, Foreground = @Fg1, TextWrapping = Wrap, Margin = (0,0,0,12) ]
+                StackPanel [ Orientation = Vertical, Visibility = $NeedsIngressAddress << ToVisibility ] {
+                    TextBlock [ Text = "Ingress address", Style = @UiCaption, Foreground = @Fg2, Margin = (0,0,0,4) ]
+                    TextBox [ UsesNativeInput = true, Text = $IngressAddress, Placeholder = "203.0.113.7", Margin = (0,0,0,4) ]
+                    TextBlock [ Text = "The public address of your ingress: Pragmatic points the hive subdomain at it.",
+                                Style = @UiCaption, Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,0,0,12) ]
+                }
+                TextBlock [ Text = $ErrorText, Foreground = @StateDangerInk, TextWrapping = Wrap, Margin = (0,0,0,12),
+                            Visibility = $ErrorText << ToVisibility ]
+                TextBlock [ Text = $DeniedReason, Style = @UiCaption, Foreground = @StateWarningInk, TextWrapping = Wrap, Margin = (0,0,0,8),
+                            Visibility = $DeniedReason << ToVisibility ]
+                StackPanel [ Orientation = Horizontal ] {
+                    Button [ Variant = Primary, Command = $ConnectCommand ] {
+                        TextBlock [ Text = "Connect this hive" ]
+                    }
+                    TextBlock [ Text = "Connecting...", Foreground = @Fg2, VerticalAlignment = Center, Margin = (12,0,0,0),
+                                Visibility = $IsBusy << ToVisibility ]
+                }
+            }
+            TextBlock [ Text = $ConnectedText, Foreground = @StateSuccessInk, TextWrapping = Wrap, Visibility = $IsEnrolled << ToVisibility ]
+        }
+    }
+
     DataTemplate [ DataType = ConnectionPageViewModel ] {
         DockPanel [ Margin = (24,20,24,20) ] {
             StackPanel [ DockPanel.Dock = Top, Orientation = Vertical, Margin = (0,0,0,16) ] {
@@ -59,7 +95,25 @@ resources ConnectionResources {
                                     }
                                     TextBlock [ Text = $Headline, Foreground = @Fg0, VerticalAlignment = Center ]
                                 }
-                                TextBlock [ Text = "Connect this hive to receive releases and let Pragmatic place your environments. In your Pragmatic account, open Hives, choose Connect a hive and use its one-time enrolment code with this hive's agent. Until then your environments run here on their own.",
+                                TextBlock [ Text = "Connect this hive to receive releases and let Pragmatic place your environments. In your Pragmatic account, open Hives, choose Connect a hive and enter its one-time enrolment code here. Until then your environments run here on their own.",
+                                            Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,8,0,0) ]
+                                ContentControl [ Content = $Connect, Visibility = $HasConnect << ToVisibility ]
+                            }
+                        }
+                    }
+
+                    // Enrolled by its key over the signed agent channel.
+                    StackPanel [ Orientation = Vertical, Visibility = $IsEnrolled << ToVisibility ] {
+                        TextBlock [ Text = "Home channel", Style = @TenantSectionCaption ]
+                        Border [ Style = @TenantPanel ] {
+                            StackPanel [ Orientation = Vertical ] {
+                                StackPanel [ Orientation = Horizontal ] {
+                                    Border [ Fill = @StateSuccessSoft, Padding = (8,2,8,2), Margin = (0,0,8,0) ] {
+                                        TextBlock [ Text = $StatusLabel, Style = @UiCaption, Foreground = @StateSuccessInk ]
+                                    }
+                                    TextBlock [ Text = $Headline, Foreground = @Fg0, VerticalAlignment = Center, TextWrapping = Wrap ]
+                                }
+                                TextBlock [ Text = "Your hive reports its health to Pragmatic over a signed channel it opens itself. Pragmatic holds only its public key.",
                                             Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,8,0,0) ]
                             }
                         }

@@ -20,7 +20,7 @@ export class TenantAdminComponent
 {
     public static readonly Name = 'pragmatic-tenant-admin'
     /** The descriptor version: this application's package version (the release test pins it to package.json). */
-    public static readonly Version = '0.1.11'
+    public static readonly Version = '0.1.12'
 
     /** The declaration: the descriptor, and the variable the start step overlays each configured setting onto. */
     public static readonly Declaration: ComponentDeclaration = {
