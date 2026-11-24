@@ -20,7 +20,7 @@ export class TenantAdminComponent
 {
     public static readonly Name = 'pragmatic-tenant-admin'
     /** The descriptor version: this application's package version (the release test pins it to package.json). */
-    public static readonly Version = '0.1.5'
+    public static readonly Version = '0.1.6'
 
     /** The declaration: the descriptor, and the variable the start step overlays each configured setting onto. */
     public static readonly Declaration: ComponentDeclaration = {
@@ -34,7 +34,7 @@ export class TenantAdminComponent
                     { name: 'secretTtlHours', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_SECRET_TTL_HOURS', default: 168, description: 'Lifetime of issued tenant secrets, in hours.' },
                     { name: 'healthProbeMs', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS', default: 30000, description: 'Interval of environment health probes, in milliseconds.' },
                     { name: 'healthProbeTimeoutMs', type: SettingType.Integer, source: 'PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_TIMEOUT_MS', default: 60000, description: 'Timeout of one environment health probe, in milliseconds.' },
-                    { name: 'desktopRealmSignIn', type: SettingType.Boolean, source: 'PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN', description: 'Whether desktop apps sign in through the realm (unset keeps the default of the console: on when the realm sign-in service is co-hosted).' },
+                    { name: 'desktopRealmSignIn', type: SettingType.Boolean, source: 'PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN', description: 'Whether /desktop/console names the tenant realm for desktop apps to sign in at (unset is on; off withholds only that, realm access tokens stay desktop bearers).' },
                 ],
             },
         ],

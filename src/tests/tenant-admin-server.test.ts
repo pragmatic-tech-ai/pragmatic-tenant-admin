@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net'
 import { Readable } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { FakeOidcIdp, TlsTestRealm, type TlsTestRealmRoute } from '@pragmatic-tech-ai/pragmatic-identity-source-oidc/testing'
 import { InjectedIdpService } from '../injected-idp-service.js'
 import { UnconfiguredIdpService } from '../unconfigured-idp-service.js'
 import { TenantAdminServer, type TenantAdminComposition } from '../tenant-admin-server.js'
@@ -112,6 +113,9 @@ class Names
     public static readonly CloseEvent = 'close'
     public static readonly ConsolePath = '/desktop/console'
     public static readonly TargetsPath = '/desktop/targets'
+    public static readonly BearerPrefix = 'Bearer '
+    public static readonly NotAToken = 'not-a-token'
+    public static readonly EmptyText = ''
     public static readonly MissingSettingCase = 'missing setting'
     public static readonly BadKeyFileCase = 'bad key file'
     public static readonly RefusedFileBody = JSON.stringify({ state: 'refused' })
@@ -279,12 +283,85 @@ class HostProbe
     }
 }
 
+/**
+ * The injected IdP's realm for the console's desktop surface (pragmatic-identity-source-oidc's testing TlsTestRealm on its
+ * private CA, signed by a FakeOidcIdp): discovery names the realm issuer and the public client method `none`, its keys
+ * verify the realm access tokens it mints for `plexus`; the discovery reads are counted.
+ */
+class DesktopTestRealm
+{
+    public static readonly RealmsSegment = '/realms/'
+    public static readonly DiscoverySuffix = '/.well-known/openid-configuration'
+    public static readonly JwksPath = '/jwks'
+    public static readonly PublicClientMethod = 'none'
+    public static readonly PlexusClientId = 'plexus'
+    public static readonly ConsoleAudience = 'pragmatic-tenant-admin'
+    public static readonly AccessTokenType = 'at+jwt'
+    public static readonly Subject = 'acct-1'
+    public static readonly SignInFamily = 'fam-1'
+    public static readonly AdminTokenFileName = 'idp-admin-token'
+    public static readonly AdminToken = 'admin-token'
+    public Reads = 0
+    private server: TlsTestRealm | undefined
+    private idp: FakeOidcIdp | undefined
+
+    public get Origin(): string
+    {
+        return this.server?.Origin ?? Names.EmptyText
+    }
+
+    /** The issuer the console names: its IdP origin's realm for the tenant. */
+    public get Issuer(): string
+    {
+        return this.Origin + DesktopTestRealm.RealmsSegment + Names.TenantId
+    }
+
+    /** Starts the realm and answers the PRAGMATIC_IDP_* variables that point the console's IdP at it. */
+    public async Start(dir: string): Promise<NodeJS.ProcessEnv>
+    {
+        const R = DesktopTestRealm
+        const routes = new Map<string, TlsTestRealmRoute>()
+        const server = await TlsTestRealm.Start(routes)
+        this.server = server
+        const idp = await FakeOidcIdp.Create(this.Issuer)
+        this.idp = idp
+        routes.set(R.RealmsSegment + Names.TenantId + R.DiscoverySuffix, () =>
+        {
+            this.Reads++
+            return { issuer: this.Issuer, jwks_uri: server.Origin + R.JwksPath, token_endpoint_auth_methods_supported: [R.PublicClientMethod] }
+        })
+        routes.set(R.JwksPath, () => idp.Jwks())
+        const tokenFile = join(dir, R.AdminTokenFileName)
+        writeFileSync(tokenFile, R.AdminToken)
+        return {
+            [TenantAdminEnv.IdpBrowserBaseUrl]: server.Origin,
+            [TenantAdminEnv.IdpBaseUrl]: server.Origin,
+            [TenantAdminEnv.IdpCaFile]: TlsTestRealm.CaFile,
+            [TenantAdminEnv.IdpAdminTokenFile]: tokenFile,
+        }
+    }
+
+    /** A realm access token for Plexus at this console (S2's claims). */
+    public async Access(): Promise<string>
+    {
+        const R = DesktopTestRealm
+        assert.ok(this.idp !== undefined, 'the realm is started')
+        return await this.idp.MintIdToken({ sub: R.Subject, aud: R.ConsoleAudience, azp: R.PlexusClientId, client_id: R.PlexusClientId, sid: R.SignInFamily }, { typ: R.AccessTokenType })
+    }
+
+    public async Stop(): Promise<void>
+    {
+        await this.server?.Stop()
+    }
+}
+
 /** Drives a `/desktop/*` GET through a composed plane's declared desktop routes, as Plexus would (no Origin header). */
 class DesktopProbe
 {
-    public static async Get(composition: TenantAdminComposition, path: string): Promise<{ handled: boolean; status: number; body: unknown }>
+    public static async Get(composition: TenantAdminComposition, path: string, bearer?: string): Promise<{ handled: boolean; status: number; body: unknown }>
     {
-        const req = Object.assign(Readable.from([]), { method: Names.Get, headers: {}, socket: { remoteAddress: Names.ClientAddress } })
+        const headers = bearer === undefined ? {} : { authorization: Names.BearerPrefix + bearer }
+        const req = Object.assign(Readable.from([]), { method: Names.Get, headers, socket: { remoteAddress: Names.ClientAddress } })
         let status = 0
         let text = Names.EmptyJson
         const res = { writeHead: (s: number) => { status = s }, end: (b: string) => { text = b }, setHeader: () => undefined }
@@ -342,6 +419,21 @@ describe('TenantAdminServer', () =>
     {
         assert.equal(TenantAdminServer.ReadConfig({ ...env(), PRAGMATIC_TENANT_ADMIN_TRUSTED_PROXY: 'true' }).trustedProxy, true)
         assert.equal(TenantAdminServer.ReadConfig({ ...env(), PRAGMATIC_ADMIN_TRUSTED_PROXY: 'true' }).trustedProxy, false)
+    })
+
+    it('ReadConfig reads PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN: on unless set off (E spec S4)', () =>
+    {
+        assert.equal(TenantAdminServer.ReadConfig(env()).desktopRealmSignIn, true, 'unset: the in-hive console names its realm')
+        assert.equal(TenantAdminServer.ReadConfig({ ...env(), [TenantAdminEnv.DesktopRealmSignIn]: '' }).desktopRealmSignIn, true)
+        for (const off of ['off', 'false', '0', 'FALSE'])
+        {
+            assert.equal(TenantAdminServer.ReadConfig({ ...env(), [TenantAdminEnv.DesktopRealmSignIn]: off }).desktopRealmSignIn, false, off)
+        }
+        for (const on of ['on', 'true', '1'])
+        {
+            assert.equal(TenantAdminServer.ReadConfig({ ...env(), [TenantAdminEnv.DesktopRealmSignIn]: on }).desktopRealmSignIn, true, on)
+        }
+        assert.throws(() => TenantAdminServer.ReadConfig({ ...env(), [TenantAdminEnv.DesktopRealmSignIn]: 'sometimes' }), new RegExp(TenantAdminEnv.DesktopRealmSignIn))
     })
 
     it('ReadConfig reads an optional external port, validated like the other ports', () =>
@@ -811,6 +903,35 @@ describe('TenantAdminServer console advert', () =>
         const composition = await server.Compose({}, undefined, () => undefined, db)
         assert.deepEqual(await DesktopProbe.Get(composition, Names.ConsolePath), { handled: true, status: Names.Ok, body: { tenantId: Names.TenantId, tenantName: Names.TenantName } })
         assert.deepEqual(await handle(composition, Names.Get), { status: Names.Ok, body: { domains: [Names.EmailDomain], editable: true, inHive: true, pending: [], verifications: [] } })
+    })
+
+    it('Compose names the realm in /desktop/console only while the desktop realm sign-in is on, and takes its access tokens either way (E spec S4, S5)', async () =>
+    {
+        writeConsoleSeed()
+        for (const [setting, names] of [[undefined, true], ['true', true], ['false', false], ['off', false]] as const)
+        {
+            const realm = new DesktopTestRealm()
+            let composition: TenantAdminComposition | undefined
+            try
+            {
+                const idpEnv = await realm.Start(root)
+                const env = { ...baseEnv(), ...idpEnv, ...(setting === undefined ? {} : { [TenantAdminEnv.DesktopRealmSignIn]: setting }) }
+                composition = await new TenantAdminServer(TenantAdminServer.ReadConfig(env), new FakeRolloutClient()).Compose(env, undefined, () => undefined, ConsoleDb.Fresh())
+                const readsBefore = realm.Reads
+                const lookup = { tenantId: Names.TenantId, tenantName: Names.TenantName }
+                const body = names ? { ...lookup, signIn: { issuer: realm.Issuer, clientId: DesktopTestRealm.PlexusClientId } } : lookup
+                assert.deepEqual(await DesktopProbe.Get(composition, Names.ConsolePath), { handled: true, status: Names.Ok, body }, String(setting))
+                assert.equal(realm.Reads - readsBefore, names ? 1 : 0, 'the lookup itself read the realm discovery (on) or nothing (off): ' + String(setting))
+                const targets = await DesktopProbe.Get(composition, Names.TargetsPath, await realm.Access())
+                assert.equal(targets.status, Names.Ok, 'a realm access token is a desktop bearer whatever the setting: ' + String(setting))
+                assert.equal((await DesktopProbe.Get(composition, Names.TargetsPath, Names.NotAToken)).status, Names.Unauthorized)
+            }
+            finally
+            {
+                await composition?.host.Close()
+                await realm.Stop()
+            }
+        }
     })
 
     it('Compose opens the console registration (a pre-A5 file imported at start) and passes it to the host when the advert is configured', async () =>

@@ -1,6 +1,6 @@
 {
   "name": "@pragmatic-tech-ai/pragmatic-tenant-admin",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "The tenant admin console (pragmatic-tenant-admind): the console that ships into a client hive, with its tenant portal.",
   "license": "Apache-2.0",
@@ -35,6 +35,7 @@
     "@pragmatic-tech-ai/todl-runtime": "^0.7.1"
   },
   "devDependencies": {
+    "@pragmatic-tech-ai/pragmatic-identity-source-oidc": "^0.18.12",
     "@types/node": "^22.20.1",
     "@types/ws": "^8.5.10",
     "pg-mem": "^3.0.0",

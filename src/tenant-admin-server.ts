@@ -34,6 +34,9 @@ export type TenantAdminConfig = {
     readonly secureCookie: boolean
     /** Whether the tenant listener is behind a trusted proxy (PRAGMATIC_TENANT_ADMIN_TRUSTED_PROXY). */
     readonly trustedProxy: boolean
+    /** Whether /desktop/console names the realm's desktop sign-in (PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN, the
+     *  setting `desktopRealmSignIn`; unset is on). Off withholds only the advert: realm access tokens stay desktop bearers. */
+    readonly desktopRealmSignIn: boolean
     readonly secretTtlHours: number
     readonly probeMs: number
     readonly probeTimeoutMs: number
@@ -96,6 +99,8 @@ export type TenantAdminComposition = {
  */
 export class TenantAdminServer
 {
+    /** The in-hive console names its realm's desktop sign-in unless told not to (the co-hosted tenant plane defaults off). */
+    private static readonly DesktopRealmSignInDefault = true
     private static readonly MissingEnvPrefix = 'Missing required environment variable: '
     private static readonly MissingMasterKeyPrefix = 'Tenant-admin master key file not found: '
     private static readonly ListeningTemplate = 'Tenant plane listening on {scheme}://{domain}:{port}/'
@@ -168,6 +173,7 @@ export class TenantAdminServer
             externalPort: TenantPlaneComposer.TenantExternalPort(env[TenantAdminEnv.ExternalPort]),
             secureCookie: TenantPlaneComposer.ReadsTrue(env[TenantAdminEnv.SecureCookie]),
             trustedProxy: TenantPlaneComposer.ReadsTrue(env[TenantAdminEnv.TrustedProxy]),
+            desktopRealmSignIn: TenantPlaneComposer.DesktopRealmSignInOf(env[TenantAdminEnv.DesktopRealmSignIn], TenantAdminServer.DesktopRealmSignInDefault),
             secretTtlHours: TenantPlaneComposer.ParseSecretTtlHours(env[TenantAdminEnv.SecretTtl]),
             probeMs: TenantPlaneComposer.ParseHealthProbeMs(env[TenantAdminEnv.HealthProbeMs]),
             probeTimeoutMs: TenantPlaneComposer.ParseHealthProbeTimeoutMs(env[TenantAdminEnv.HealthProbeTimeoutMs]),
@@ -381,6 +387,7 @@ export class TenantAdminServer
             Relay: relay,
             EmailDomains: emailDomains,
             ConsoleTenantId: tenant.id,
+            DesktopRealmSignIn: cfg.desktopRealmSignIn,
             Graphs: graphs,
             Configuration: configuration.Service,
         })

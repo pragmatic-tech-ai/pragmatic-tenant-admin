@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "component": "pragmatic-tenant-admin",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "options": [
     {
       "name": "core",
@@ -36,7 +36,7 @@
           "type": "boolean",
           "required": false,
           "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN: Whether desktop apps sign in through the realm (unset keeps the default of the console: on when the realm sign-in service is co-hosted)."
+          "description": "PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN: Whether /desktop/console names the tenant realm for desktop apps to sign in at (unset is on; off withholds only that, realm access tokens stay desktop bearers)."
         }
       ]
     }
