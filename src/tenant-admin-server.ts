@@ -23,6 +23,7 @@ import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
 import { PreparationSchedule } from './configuration/preparation-schedule.js'
 import { InterimSecretMigration, InterimSecretMigrationOutcome } from './configuration/interim-secret-migration.js'
 import { ReleaseDescriptorCatalogue } from './configuration/release-descriptor-catalogue.js'
+import { RealmSecretsDatabase } from './environments/realm-secrets-database.js'
 import { EngineComposition } from './engine-composition.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
 import { EngineRolloutClient } from './tenant-api/engine-rollout-client.js'
@@ -147,10 +148,22 @@ export class TenantAdminServer
     /** Entry point used by the bin: reads config from the environment and runs with the default rollout client. */
     public static async Main(): Promise<void>
     {
-        // First of all: the applied configuration (the mounted pragmatic-config-pragmatic-tenant-admin) over the environment;
-        // a configuration the console applied to itself that refuses its start is put back before it exits.
-        const config = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, process.env, env => TenantAdminServer.ReadConfig(env))
+        const config = await TenantAdminServer.StartConfig(process.env,
+            env => RealmSecretsDatabase.EnsureFromEnvironment(env, TenantAdminServer.LogLine),
+            env => ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env, e => TenantAdminServer.ReadConfig(e)))
         await new TenantAdminServer(config, TenantAdminServer.RolloutClientFrom(process.env)).Run()
+    }
+
+    /**
+     * The start's first two steps, in this order: the custom realm secrets home (2.5) is provisioned before any directory
+     * opens it (this console's, then the sign-in service's and the environments' when they start); then the applied
+     * configuration (the mounted pragmatic-config-pragmatic-tenant-admin) over the environment, a configuration the console
+     * applied to itself that refuses its start being put back before it exits.
+     */
+    public static async StartConfig<T>(env: NodeJS.ProcessEnv, provision: (env: NodeJS.ProcessEnv) => Promise<void>, configuration: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T>
+    {
+        await provision(env)
+        return await configuration(env)
     }
 
     /**

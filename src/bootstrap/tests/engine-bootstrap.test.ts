@@ -165,6 +165,24 @@ describe('EngineBootstrap', () =>
         assert.equal(Buffer.from(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.TenantAdminMasterKey)?.data?.['master.key'] ?? '', 'base64').length, 32)
     })
 
+    it('mints the custom realm secrets home: the realm master key (copied for the sign-in service) and its three roles on realm_secrets', async () =>
+    {
+        const cluster = new MemoryCluster()
+        await BootstrapFixture.Run(cluster)
+        const key = cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.RealmMasterKey)?.data?.['master.key'] ?? ''
+        assert.equal(Buffer.from(key, 'base64').length, 32)
+        assert.equal(cluster.Secret(BootstrapFixture.IdpNamespace, EngineSecretSet.RealmMasterKey)?.data?.['master.key'], key, 'the sign-in service opens the same home')
+        assert.notEqual(key, cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.TenantAdminMasterKey)?.data?.['master.key'], 'a key of its own')
+        for (const [name, role] of [[EngineSecretSet.PostgresRealmSecretsConsole, 'realm_secrets_console'], [EngineSecretSet.PostgresRealmSecretsIdp, 'realm_secrets_idp'], [EngineSecretSet.PostgresRealmSecretsEnvironments, 'realm_secrets_environments']])
+        {
+            const secret = cluster.Secret(BootstrapFixture.Namespace, name)
+            assert.equal(BootstrapFixture.Decoded(secret, 'database-url'), 'postgres://' + role + ':' + BootstrapFixture.Decoded(secret, 'password') + '@pragmatic-postgres.pragmatic-system.svc:5432/realm_secrets', name)
+        }
+        assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.IdpNamespace, EngineSecretSet.IdpRealmSecretsDatabase), 'database-url'),
+            BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.PostgresRealmSecretsIdp), 'database-url'))
+        assert.equal(cluster.Secret(BootstrapFixture.IdpNamespace, EngineSecretSet.PostgresRealmSecretsConsole), undefined, 'the role of the console never reaches the namespace of the sign-in service')
+    })
+
     it('mints the console certificate for the console, the sign-in service and every environment of the base domain', async () =>
     {
         const minter = new RecordingMinter()

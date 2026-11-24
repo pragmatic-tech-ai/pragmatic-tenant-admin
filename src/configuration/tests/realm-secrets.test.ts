@@ -9,6 +9,7 @@ import { ConfigurationApplyResult, ConfigurationService, ConfigurationTarget, ty
 import { ComponentSecretWriter } from '../component-secret-writer.js'
 import { InterimSecretMigration, InterimSecretMigrationOutcome, type IConsoleSelfTarget } from '../interim-secret-migration.js'
 import { RealmCapableComponents } from '../realm-capable-components.js'
+import { KubeRealmHomeWorkloads, type IRealmHomeWorkloads } from '../realm-home-workloads.js'
 import { RealmComponentSecretWriter } from '../realm-component-secret-writer.js'
 import { ConsoleStartFallback } from '../console-start-fallback.js'
 import { TenantAdminComponent } from '../../tenant-admin-component.js'
@@ -132,9 +133,19 @@ class Scene
         return saved.version
     }
 
-    public Migration(self?: IConsoleSelfTarget): InterimSecretMigration
+    public Migration(self?: IConsoleSelfTarget, workloads?: IRealmHomeWorkloads): InterimSecretMigration
     {
-        return new InterimSecretMigration(this.Service, new KubeApiClient(this.Cluster), this.Home, self, Scene.Capable)
+        return new InterimSecretMigration(this.Service, new KubeApiClient(this.Cluster), this.Home, self, Scene.Capable, workloads)
+    }
+
+    /** A Deployment of `component` in `namespace` whose container names the realm secrets option, or not. */
+    public Workload(namespace: string, component: string, given: boolean): void
+    {
+        const env = given ? [{ name: 'PRAGMATIC_PORT', value: '8080' }, { name: 'PRAGMATIC_REALM_SECRETS_OPTION', value: 'custom' }] : [{ name: 'PRAGMATIC_PORT', value: '8080' }]
+        this.Cluster.Put(`/apis/apps/v1/namespaces/${namespace}/deployments/${component}`, {
+            apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: component, namespace, labels: { [`component.pragmatic-tech.ai/${component}`]: 'server' } },
+            spec: { template: { spec: { containers: [{ name: 'server', image: 'x', env }] } } },
+        })
     }
 
     public DeletedAt(namespace: string, component: string = Scene.Server): number
@@ -163,8 +174,9 @@ describe('secrets in the realm secrets home', () =>
         assert.equal((await scene.Service.PutSecret(Scene.Tenant, Scene.Server, 'dev1', 'token', 'v')).reference, 'secret:file/token')
         assert.equal(Scene.Capable.Reads(Scene.Server, undefined), false, 'an unknown version is not taken to read it')
         assert.equal(Scene.Capable.Reads('pragmatic-hive-agent', '9.9.9'), false)
-        // Until Task 6 renders the home's settings for environment workloads, the console's own table leaves the env server out.
-        assert.equal(RealmCapableComponents.Default.Reads(Scene.Server, '0.1.4'), false)
+        // The console renders the home's settings into environment workloads (Task 6): the env server reads it from 0.1.4.
+        assert.equal(RealmCapableComponents.Default.Reads(Scene.Server, '0.1.4'), true)
+        assert.equal(RealmCapableComponents.Default.Reads(Scene.Server, '0.1.3'), false)
         assert.equal(RealmCapableComponents.Default.Reads(Scene.Idp, '0.2.8'), true)
         assert.equal(RealmCapableComponents.Default.Reads(TenantAdminComponent.Name, '0.1.8'), false)
     })
@@ -263,6 +275,34 @@ describe('secrets in the realm secrets home', () =>
         assert.equal(await scene.Outcome(), InterimSecretMigrationOutcome.AwaitingUpgrade)
         assert.deepEqual(scene.Applier.Applied.map(apply => apply.Namespace), ['pragmatic-env-dev1'])
         assert.ok(scene.Secret('pragmatic-env-dev2') !== undefined)
+    })
+
+    it('a capable target whose workload is not given the settings of the home keeps the file store and its Secret', async () =>
+    {
+        const scene = new Scene()
+        await scene.AppliedWithFileToken()
+        scene.Workload('pragmatic-env-dev1', Scene.Server, true)
+        scene.Workload('pragmatic-env-dev2', Scene.Server, false)
+        const workloads = new KubeRealmHomeWorkloads(new KubeApiClient(scene.Cluster), () => undefined)
+        assert.equal(await workloads.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)), true)
+        assert.equal(await workloads.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev2', Scene.Server)), false, 'rendered before the console had the home, then rolled')
+        assert.equal(await workloads.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-gone', Scene.Server)), false, 'no Deployment')
+        scene.Interim('pragmatic-env-dev1', { token: 'v' })
+        scene.Interim('pragmatic-env-dev2', { token: 'v' })
+        assert.equal((await scene.Migration(undefined, workloads).Run(Scene.Tenant)).find(report => report.Component === Scene.Server)!.Outcome, InterimSecretMigrationOutcome.AwaitingUpgrade)
+        assert.deepEqual(scene.Applier.Applied.map(apply => apply.Namespace), ['pragmatic-env-dev1'])
+        assert.ok(scene.Secret('pragmatic-env-dev2') !== undefined)
+        const writer = new RealmComponentSecretWriter(new RealmSecretWriter(scene.Home), new ComponentSecretWriter(new KubeApiClient(scene.Cluster)), scene.Targets, Scene.Tenant, Scene.Capable, workloads)
+        assert.equal((await writer.Put(Scene.Server, 'token', 'v2', [new ApplyTarget('h1', 'pragmatic-env-dev2', Scene.Server)])).Format(), 'secret:file/token')
+        assert.equal((await writer.Put(Scene.Server, 'token', 'v2', [new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)])).Format(), 'secret:realm/token')
+    })
+
+    it('a workload the API cannot read is not given the home, and that is logged by name', async () =>
+    {
+        const lines: string[] = []
+        const failing = new KubeApiClient({ Send: async () => { throw new TypeError('fetch failed') } } as never)
+        assert.equal(await new KubeRealmHomeWorkloads(failing, line => lines.push(line)).Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)), false)
+        assert.deepEqual(lines, ['realm secrets: the workload of a target could not be read, so it keeps its interim secrets: pragmatic-env-dev1/pragmatic-env-server/TypeError'])
     })
 
     it('a target that runs a newer component version gets the rewritten version for that version', async () =>

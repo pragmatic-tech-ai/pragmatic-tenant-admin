@@ -49,10 +49,30 @@ describe('engine mode', () =>
     it('the engine composition takes both release images or neither', () =>
     {
         const both = EngineComposition.From({ [EngineEnv.EnvServerImage]: 'server@sha256:a', [EngineEnv.UiUnpackImage]: 'unpack@sha256:b' })
-        assert.deepEqual(both.Environment, { ServerImage: 'server@sha256:a', UiUnpackImage: 'unpack@sha256:b', IngressClass: undefined })
+        assert.deepEqual(both.Environment, { ServerImage: 'server@sha256:a', UiUnpackImage: 'unpack@sha256:b', IngressClass: undefined, RealmSecrets: undefined })
         assert.equal(EngineComposition.From({ [EngineEnv.EnvServerImage]: 'server@sha256:a', [EngineEnv.UiUnpackImage]: 'unpack@sha256:b', [EngineEnv.IngressClass]: 'traefik' }).Environment?.IngressClass, 'traefik')
         assert.equal(EngineComposition.From({}).Environment, undefined)
         assert.throws(() => EngineComposition.From({ [EngineEnv.EnvServerImage]: 'server@sha256:a' }), /both/)
         assert.equal(EngineComposition.From({ [EngineEnv.Mode]: 'standalone' }).Standalone, true)
+    })
+
+    it('environments get the realm secrets home the chart gives the console: the custom reader material, or a cloud option identifiers', () =>
+    {
+        const images = { [EngineEnv.EnvServerImage]: 'server@sha256:a', [EngineEnv.UiUnpackImage]: 'unpack@sha256:b' }
+        const custom = EngineComposition.From({
+            ...images, PRAGMATIC_REALM_SECRETS_OPTION: 'custom', PRAGMATIC_REALM_ID: 'acme', PRAGMATIC_REALM_SECRETS_DATABASE_URL_FILE: '/run/secrets/pragmatic-realm-secrets/database-url',
+            PRAGMATIC_REALM_SECRETS_MASTER_KEY_FILE: '/run/secrets/pragmatic-realm-master-key/master.key', PRAGMATIC_REALM_SECRETS_ACCESS: 'writer',
+            [EngineEnv.RealmSecretsReaderUrlFile]: '/run/secrets/realm-secrets-reader/database-url',
+        }).Environment!.RealmSecrets!
+        assert.equal(custom.Option, 'custom')
+        assert.equal(custom.RealmId, 'acme')
+        const env = Object.fromEntries(custom.EnvVars().map(v => [v.name as string, v.value as string]))
+        assert.equal(env.PRAGMATIC_REALM_SECRETS_ACCESS, 'reader', 'an environment reads; the console writes')
+        const gcp = EngineComposition.From({
+            ...images, PRAGMATIC_REALM_SECRETS_OPTION: 'gcp', PRAGMATIC_REALM_ID: 'acme', PRAGMATIC_REALM_SECRETS_PROJECT_ID: 'pragmatic-ops',
+            PRAGMATIC_REALM_SECRETS_WORKLOAD_IDENTITY_AUDIENCE: '//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/pragmatic-hives/providers/pragmatic-customer',
+        }).Environment!.RealmSecrets!
+        assert.equal(gcp.Audience, '//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/pragmatic-hives/providers/pragmatic-customer')
+        assert.throws(() => EngineComposition.From({ ...images, PRAGMATIC_REALM_SECRETS_OPTION: 'custom', PRAGMATIC_REALM_ID: 'acme' }), /reader material/, 'custom without the reader URL')
     })
 })

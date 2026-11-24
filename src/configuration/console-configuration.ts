@@ -7,6 +7,8 @@ import { TenantAdminComponent } from '../tenant-admin-component.js'
 import { ComponentSecretWriter } from './component-secret-writer.js'
 import { InterimSecretMigration } from './interim-secret-migration.js'
 import { RealmComponentSecretWriter } from './realm-component-secret-writer.js'
+import { RealmCapableComponents } from './realm-capable-components.js'
+import { KubeRealmHomeWorkloads } from './realm-home-workloads.js'
 import { ImageComponentDigests } from './image-component-digests.js'
 import { KubeConfigurationApplier } from './kube-configuration-applier.js'
 import { LabelConfigurationTargets, type IConfiguredNamespaces } from './label-configuration-targets.js'
@@ -170,9 +172,10 @@ export class ConsoleConfiguration
         const self = C.SelfOf(parts.Client, parts.TenantId, parts.HiveId)
         const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, self, lock, preparer)
         const interim = new ComponentSecretWriter(parts.Client)
-        const secrets = parts.RealmSecrets === undefined ? interim : new RealmComponentSecretWriter(new RealmSecretWriter(parts.RealmSecrets), interim, targets, parts.TenantId)
+        const workloads = new KubeRealmHomeWorkloads(parts.Client, log)
+        const secrets = parts.RealmSecrets === undefined ? interim : new RealmComponentSecretWriter(new RealmSecretWriter(parts.RealmSecrets), interim, targets, parts.TenantId, RealmCapableComponents.Default, workloads)
         const service = new ConfigurationService(parts.Repository, catalogue, targets, applier, secrets, preparer)
-        const migration = parts.RealmSecrets === undefined ? undefined : new InterimSecretMigration(service, parts.Client, parts.RealmSecrets, self)
+        const migration = parts.RealmSecrets === undefined ? undefined : new InterimSecretMigration(service, parts.Client, parts.RealmSecrets, self, RealmCapableComponents.Default, workloads)
         return new ComposedConsoleConfiguration(service, preparer, self, migration)
     }
 

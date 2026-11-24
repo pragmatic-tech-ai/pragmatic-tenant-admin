@@ -123,6 +123,7 @@ $pragmatic$`
     /** SQLSTATE duplicate_database: a concurrent create won the race; the owner check below decides. */
     private static readonly DuplicateDatabase = '42P04'
     private static readonly NoParams: readonly unknown[] = []
+    private static readonly BadRolePrefix = 'not a PostgreSQL role name: '
     private static readonly NoTransactions = 'the hive Postgres session must support transactions (the role password is a transaction-local setting)'
 
     public constructor(private readonly superuser: ISqlSession, private readonly wait: IProvisionWait = new TimerProvisionWait())
@@ -160,21 +161,7 @@ $pragmatic$`
         const P = HivePostgresProvisioner
         const name = EnvironmentHiveDatabase.NameOf(environmentName)
         const quoted = P.Quoted(name)
-        const transaction = this.superuser.Transaction?.bind(this.superuser)
-        if (transaction === undefined)
-        {
-            throw new Error(P.NoTransactions)
-        }
-        await transaction(async tx =>
-        {
-            for (const quiet of P.QuietLoggingSql)
-            {
-                await tx.Execute(quiet, P.NoParams)
-            }
-            await tx.Query(P.SetSettingSql, [P.RoleSetting, name])
-            await tx.Query(P.SetSettingSql, [P.PasswordSetting, ScramVerifier.Of(password)])
-            await tx.Execute(P.EnsureRoleSql, P.NoParams)
-        })
+        await this.EnsureRole(name, password)
         // CREATE DATABASE cannot run in a transaction: created when absent, then its owner checked either way.
         if (await this.OwnerOf(name) === undefined)
         {
@@ -198,6 +185,34 @@ $pragmatic$`
         await this.superuser.Execute(P.RevokePrefix + quoted + P.FromPublicSuffix, P.NoParams)
         await this.superuser.Execute(P.GrantPrefix + quoted + P.ToInfix + quoted, P.NoParams)
         return { Database: name, Role: name }
+    }
+
+    /**
+     * A login role with no other privilege and `password` (its SCRAM verifier, with statement and parameter logging off),
+     * created when absent; the password set again either way. `role` must be a PostgreSQL identifier.
+     */
+    public async EnsureRole(role: string, password: string): Promise<void>
+    {
+        const P = HivePostgresProvisioner
+        if (!EnvironmentHiveDatabase.NamePattern.test(role))
+        {
+            throw new Error(P.BadRolePrefix + role)
+        }
+        const transaction = this.superuser.Transaction?.bind(this.superuser)
+        if (transaction === undefined)
+        {
+            throw new Error(P.NoTransactions)
+        }
+        await transaction(async tx =>
+        {
+            for (const quiet of P.QuietLoggingSql)
+            {
+                await tx.Execute(quiet, P.NoParams)
+            }
+            await tx.Query(P.SetSettingSql, [P.RoleSetting, role])
+            await tx.Query(P.SetSettingSql, [P.PasswordSetting, ScramVerifier.Of(password)])
+            await tx.Execute(P.EnsureRoleSql, P.NoParams)
+        })
     }
 
     /** Drops the environment's database (closing its sessions) and its role; on the environment's deletion only. */

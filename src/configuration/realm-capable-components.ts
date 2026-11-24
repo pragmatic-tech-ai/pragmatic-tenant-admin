@@ -7,20 +7,23 @@ import { ComponentVersionOrder } from './component-version-order.js'
  * a component not listed, or a version the console does not know (a development image) keeps the interim `file` store,
  * so a configuration it cannot read is never applied to it.
  *
- * The engine chart gives the home's settings to the engine components (the console, the realm sign-in service). The env
- * server (from 0.1.4) reads the home too, but runs in environments the console renders itself: it joins this list with
- * Task 6, when the console's manifests carry the same settings and projected token to environment workloads.
+ * The engine chart gives the home's settings to the engine components (the console, the realm sign-in service); the console
+ * renders the same settings, and a projected token or the custom home's reader mounts, into every environment's server
+ * (EnvironmentRealmSecrets), which reads the home from 0.1.4.
  */
 export class RealmCapableComponents
 {
     private static readonly IdpName = 'pragmatic-tenant-idp'
     private static readonly IdpFirst = '0.2.8'
     private static readonly ConsoleFirst = '0.1.9'
+    private static readonly EnvServerName = 'pragmatic-env-server'
+    private static readonly EnvServerFirst = '0.1.4'
 
     /** The engine components the chart gives the realm secrets home. */
     public static readonly Default = new RealmCapableComponents(new Map([
         [TenantAdminComponent.Name, RealmCapableComponents.ConsoleFirst],
         [RealmCapableComponents.IdpName, RealmCapableComponents.IdpFirst],
+        [RealmCapableComponents.EnvServerName, RealmCapableComponents.EnvServerFirst],
     ]))
 
     public constructor(private readonly firstVersions: ReadonlyMap<string, string>)

@@ -63,6 +63,12 @@ export class EngineSecretSet
     public static readonly DevCa = 'pragmatic-tls-dev-ca'
     public static readonly ConsoleTls = 'pragmatic-console-tls'
     public static readonly OwnerInitial = 'pragmatic-owner-initial'
+    /** The custom realm secrets home (2.5): the realm master key (copied into the sign-in service's namespace) and its three roles. */
+    public static readonly RealmMasterKey = 'pragmatic-realm-master-key'
+    public static readonly PostgresRealmSecretsConsole = 'pragmatic-postgres-realm-secrets-console'
+    public static readonly PostgresRealmSecretsIdp = 'pragmatic-postgres-realm-secrets-idp'
+    public static readonly PostgresRealmSecretsEnvironments = 'pragmatic-postgres-realm-secrets-environments'
+    public static readonly IdpRealmSecretsDatabase = 'pragmatic-tenant-idp-realm-secrets'
 
     public static readonly KeepAnnotation = 'helm.sh/resource-policy'
     public static readonly KeepValue = 'keep'
@@ -94,9 +100,16 @@ export class EngineSecretSet
             { Name: S.IdpMasterKey, Scope: I, Keys: [S.MasterKeyKey], Type: S.OpaqueType, Origin: M },
             { Name: S.IdpSigningKey, Scope: I, Keys: [S.SigningKeyKey], Type: S.OpaqueType, Origin: M },
             { Name: S.IdpTls, Scope: I, Keys: [S.CaKey, S.ServerCertKey, S.ServerKeyKey], Type: S.OpaqueType, Origin: M },
+            // Minted whatever the realm secrets option, so a later switch to the custom home finds them; mounted only then.
+            { Name: S.RealmMasterKey, Scope: E, Keys: [S.MasterKeyKey], Type: S.OpaqueType, Origin: M },
+            { Name: S.PostgresRealmSecretsConsole, Scope: E, Keys: db, Type: S.OpaqueType, Origin: M },
+            { Name: S.PostgresRealmSecretsIdp, Scope: E, Keys: db, Type: S.OpaqueType, Origin: M },
+            { Name: S.PostgresRealmSecretsEnvironments, Scope: E, Keys: db, Type: S.OpaqueType, Origin: M },
             { Name: S.IdpCa, Scope: E, Keys: [S.CaKey], Type: S.OpaqueType, Origin: C },
             { Name: S.IdpAdminToken, Scope: I, Keys: [S.AdminTokenKey], Type: S.OpaqueType, Origin: C },
             { Name: S.IdpDatabase, Scope: I, Keys: [S.DatabaseUrlKey], Type: S.OpaqueType, Origin: C },
+            { Name: S.RealmMasterKey, Scope: I, Keys: [S.MasterKeyKey], Type: S.OpaqueType, Origin: C },
+            { Name: S.IdpRealmSecretsDatabase, Scope: I, Keys: [S.DatabaseUrlKey], Type: S.OpaqueType, Origin: C },
         ]
         if (selfSigned)
         {

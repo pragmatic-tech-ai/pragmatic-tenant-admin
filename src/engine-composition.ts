@@ -1,11 +1,12 @@
 import { PgSession } from '@pragmatic-tech-ai/pragmatic-realm-adapters'
 import { PostgresPoolFactory } from '@pragmatic-tech-ai/pragmatic-realm-custom'
-import { K8sManifestBuilder, type EngineEnvironment, type IIdpService, type IngressTls, type TenantRecord } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { EnvironmentRealmSecrets, K8sManifestBuilder, type EngineEnvironment, type IIdpService, type IngressTls, type TenantRecord } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import type { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { IngressTlsCopies } from './ingress-tls-copies.js'
 import { InitialOwnerSeeder } from './bootstrap/initial-owner-seeder.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
 import { HivePostgresProvisioner } from './environments/hive-postgres-provisioner.js'
+import { MountedRealmSecretsMaterial } from './environments/realm-secrets-database.js'
 
 /**
  * What a chart-installed management engine adds to the console (nothing for a console the platform pushed): its mode, the
@@ -37,7 +38,10 @@ export class EngineComposition
         {
             throw new Error(EngineComposition.PartialImages)
         }
-        const environment = server !== undefined && unpack !== undefined ? { ServerImage: server, UiUnpackImage: unpack, IngressClass: E.OptionalOf(env, E.IngressClass) } : undefined
+        // The realm's secrets home the environments' servers read through (2.5): the option and identifiers the chart gives
+        // this console, and for the custom home the reader material the console copies into each environment namespace.
+        const realmSecrets = EnvironmentRealmSecrets.FromEnvironment(env, MountedRealmSecretsMaterial.FromEnvironment(env))
+        const environment = server !== undefined && unpack !== undefined ? { ServerImage: server, UiUnpackImage: unpack, IngressClass: E.OptionalOf(env, E.IngressClass), RealmSecrets: realmSecrets } : undefined
         return new EngineComposition(E.ModeOf(env), environment, E.OptionalOf(env, E.HivePostgresUrlFile), E.OptionalOf(env, E.OwnerInitialDir))
     }
 

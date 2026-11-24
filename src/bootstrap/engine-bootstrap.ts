@@ -5,6 +5,7 @@ import { ReleaseApp } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import type { BootstrapSettings } from './bootstrap-settings.js'
 import { EngineSecretOrigin, EngineSecretScope, EngineSecretSet, type EngineSecretSpec } from './engine-secret-set.js'
 import type { ITlsMinter, TlsMaterial } from './tls-minter.js'
+import { RealmSecretsDatabase } from '../environments/realm-secrets-database.js'
 
 /** Random bytes for every minted value (crypto.randomBytes in the Job; a fixed source in tests). */
 export interface IRandomSource
@@ -220,8 +221,15 @@ export class EngineBootstrap
                 return this.DatabaseSecret(B.TenantAdminDatabase, B.TenantAdminDatabase)
             case S.PostgresTenantIdp:
                 return this.DatabaseSecret(B.TenantIdpDatabase, B.TenantIdpDatabase)
+            case S.PostgresRealmSecretsConsole:
+                return this.DatabaseSecret(RealmSecretsDatabase.ConsoleRole, RealmSecretsDatabase.Database)
+            case S.PostgresRealmSecretsIdp:
+                return this.DatabaseSecret(RealmSecretsDatabase.IdpRole, RealmSecretsDatabase.Database)
+            case S.PostgresRealmSecretsEnvironments:
+                return this.DatabaseSecret(RealmSecretsDatabase.EnvironmentsRole, RealmSecretsDatabase.Database)
             case S.TenantAdminMasterKey:
             case S.IdpMasterKey:
+            case S.RealmMasterKey:
                 return { [S.MasterKeyKey]: this.random.Bytes(B.KeyBytes) }
             case S.TenantAdminFingerprint:
                 return { [S.FingerprintKeyKey]: this.random.Bytes(ConsoleFingerprintKeys.KeyBytes) }
@@ -254,6 +262,10 @@ export class EngineBootstrap
                 return { [S.AdminTokenKey]: await this.SourceKey(s.Namespace, S.IdpAdminToken, S.AdminTokenKey) }
             case S.IdpDatabase:
                 return { [S.DatabaseUrlKey]: await this.SourceKey(s.Namespace, S.PostgresTenantIdp, S.DatabaseUrlKey) }
+            case S.RealmMasterKey:
+                return { [S.MasterKeyKey]: await this.SourceKey(s.Namespace, S.RealmMasterKey, S.MasterKeyKey) }
+            case S.IdpRealmSecretsDatabase:
+                return { [S.DatabaseUrlKey]: await this.SourceKey(s.Namespace, S.PostgresRealmSecretsIdp, S.DatabaseUrlKey) }
             default:
                 // The console certificate for the sign-in service's Ingress (the minted one or the operator's).
                 return {

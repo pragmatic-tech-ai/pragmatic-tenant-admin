@@ -5,6 +5,7 @@ import { RealmSecretName, type IRealmSecretStore } from '@pragmatic-tech-ai/prag
 import { ComponentConfigurationMounts, type ConfigurationComponentSummaryDto, type ConfigurationService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../tenant-admin-component.js'
 import { RealmCapableComponents } from './realm-capable-components.js'
+import { EveryRealmHomeWorkload, type IRealmHomeWorkloads } from './realm-home-workloads.js'
 
 /** How the move of one component's interim secrets ended. */
 export enum InterimSecretMigrationOutcome
@@ -105,7 +106,8 @@ export class InterimSecretMigration
         private readonly client: KubeApiClient,
         private readonly home: IRealmSecretStore,
         private readonly self?: IConsoleSelfTarget,
-        private readonly capable: RealmCapableComponents = RealmCapableComponents.Default)
+        private readonly capable: RealmCapableComponents = RealmCapableComponents.Default,
+        private readonly workloads: IRealmHomeWorkloads = new EveryRealmHomeWorkload())
     {
     }
 
@@ -227,7 +229,8 @@ export class InterimSecretMigration
         let self = false
         for (const secret of secrets)
         {
-            if (!this.capable.Reads(component, secret.Target.componentVersion))
+            // A target that cannot read the home yet (an older version, or a workload not given the home's settings) waits.
+            if (!this.capable.Reads(component, secret.Target.componentVersion) || !await this.workloads.Gives(component, secret.ApplyTarget))
             {
                 upgrade = true
                 continue

@@ -23,6 +23,10 @@ export class EngineEnv
     public static readonly IngressClass = 'PRAGMATIC_TENANT_ADMIN_INGRESS_CLASS'
     /** The folder of the Owner's initial sign-in (files `email`, `password`), seeded into the realm at start. */
     public static readonly OwnerInitialDir = 'PRAGMATIC_TENANT_ADMIN_OWNER_INITIAL_DIR'
+    /** The custom realm secrets home (2.5): the folder of the three roles' minted passwords (`console`, `idp`, `environments`). */
+    public static readonly RealmSecretsRolesDir = 'PRAGMATIC_TENANT_ADMIN_REALM_SECRETS_ROLES_DIR'
+    /** The environments' reader URL of the custom home, copied with the realm master key into every environment namespace. */
+    public static readonly RealmSecretsReaderUrlFile = 'PRAGMATIC_TENANT_ADMIN_REALM_SECRETS_READER_URL_FILE'
     private static readonly UnknownModePrefix = 'PRAGMATIC_ENGINE_MODE has an unknown value: '
     private static readonly Empty = ''
 
