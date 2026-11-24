@@ -107,11 +107,10 @@ class LiveIdp
     }
 
     /** The ConfigMap as the console left it on the hive: version 3 (hand-applied for 0.2.0) and the 0.2.4, 0.2.5 and 0.2.6 entries. */
-    public static async Cluster(image: string): Promise<FakeCluster>
+    public static async Cluster(image: string, applied: AppliedConfiguration = new AppliedConfiguration(LiveIdp.Tenant, LiveIdp.Idp, 3, '0.2.0', LiveIdp.Descriptor('0.2.0').ContentDigest(), LiveIdp.Document as never)): Promise<FakeCluster>
     {
         const L = LiveIdp
         const cluster = new FakeCluster()
-        const applied = new AppliedConfiguration(L.Tenant, L.Idp, 3, '0.2.0', L.Descriptor('0.2.0').ContentDigest(), L.Document as never)
         cluster.Put(L.DeploymentPath, {
             apiVersion: 'apps/v1', kind: 'Deployment',
             metadata: { name: L.Namespace, namespace: L.Namespace, labels: { 'component.pragmatic-tech.ai/pragmatic-tenant-idp': 'idp', 'app.kubernetes.io/managed-by': 'pragmatic-tenant-admin' } },
@@ -124,6 +123,7 @@ class LiveIdp
         let entries = map
         for (const [version, number] of [['0.2.4', 1], ['0.2.5', 2]] as const)
         {
+            if (version === applied.ComponentVersion) continue
             const d = L.Descriptor(version)
             entries = AppliedConfigurationEntries.With(entries as never, new AppliedConfiguration(L.Tenant, L.Idp, number, d.Version, d.ContentDigest(), L.Document as never)) as never
         }
@@ -207,6 +207,51 @@ describe('row 2 (live proof early.13): the retired IdP entries go once the conso
         const preparer = new ConfigurationPreparer(new KubeApiClient(cluster), new InMemoryConfigurationRepository(), L.Descriptors(), targets)
         const applied = AppliedConfigurationCodec.FromConfigMap(cluster.Objects.get(L.ConfigMapPath)!)
         await preparer.PrepareApplied(applied, new ApplyTarget('default-mvp-hive', L.Namespace, L.Namespace))
+        assert.deepEqual(LiveIdp.Keys(cluster), ['configuration.json', L.EntryKey('0.2.6')].sort())
+    })
+
+    it('an applied file for the release itself (an apply of 0.2.6 keeps the other entries) does not keep the retired ones (review I1)', async () =>
+    {
+        const L = LiveIdp
+        const ghcr = new PublicGhcr()
+        const d026 = L.Descriptor('0.2.6')
+        const applied = new AppliedConfiguration(L.Tenant, L.Idp, 4, d026.Version, d026.ContentDigest(), L.Document as never)
+        const cluster = await L.Cluster(`${PublicGhcr.Host}/${L.Repo}@${ghcr.Image(L.Repo, d026.ContentDigest())}`, applied)
+        assert.deepEqual(LiveIdp.Keys(cluster), ['configuration.json', L.EntryKey('0.2.4'), L.EntryKey('0.2.5')].sort(), 'as an apply of version 4 for 0.2.6 left it')
+        const clients: IRegistryClients = { For: host => new OciRegistryClient('https://' + host, ghcr.Fetch) }
+        const targets = new LabelConfigurationTargets(new KubeApiClient(cluster), new IdpNamespace(), new ImageComponentDigests(clients), { VersionOf: () => undefined })
+        const lines: string[] = []
+        await new ConfigurationPreparer(new KubeApiClient(cluster), new InMemoryConfigurationRepository(), L.Descriptors(), targets, new ConfigMapWriteLock(), line => lines.push(line)).PrepareAll(L.Tenant)
+        assert.deepEqual(LiveIdp.Keys(cluster), ['configuration.json'])
+        assert.equal(AppliedConfigurationCodec.FromConfigMap(cluster.Objects.get(L.ConfigMapPath)!).Version, 4, 'the applied file stays')
+        assert.equal(lines.length, 1)
+    })
+
+    it('a roll that has not finished (a surge pod beside the old one, or a pod not yet available) drops nothing; once it has, the retired entries go (review I2)', async () =>
+    {
+        const L = LiveIdp
+        const ghcr = new PublicGhcr()
+        const cluster = await L.Cluster(`${PublicGhcr.Host}/${L.Repo}@${ghcr.Image(L.Repo, L.Descriptor('0.2.6').ContentDigest())}`)
+        const clients: IRegistryClients = { For: host => new OciRegistryClient('https://' + host, ghcr.Fetch) }
+        const targets = new LabelConfigurationTargets(new KubeApiClient(cluster), new IdpNamespace(), new ImageComponentDigests(clients), { VersionOf: () => undefined })
+        const preparer = new ConfigurationPreparer(new KubeApiClient(cluster), new InMemoryConfigurationRepository(), L.Descriptors(), targets)
+        const all = ['configuration.json', L.EntryKey('0.2.4'), L.EntryKey('0.2.5'), L.EntryKey('0.2.6')].sort()
+        // A surge: the old pod (the image before) still serves beside the new one, which is not ready yet.
+        const template = cluster.Objects.get(L.DeploymentPath)!.spec.template
+        const old = structuredClone(template)
+        old.spec.containers[0].image = 'ghcr.test/pragmatic-tech-ai/pragmatic-tenant-idp@sha256:' + '5'.repeat(64)
+        cluster.Readies = () => false
+        cluster.Pods.set(L.DeploymentPath, [old, structuredClone(template)])
+        await preparer.PrepareAll(L.Tenant)
+        assert.deepEqual(LiveIdp.Keys(cluster), all, 'the old pod may still read its entry')
+        // One new pod that is not available yet (a Recreate roll starting).
+        cluster.Pods.set(L.DeploymentPath, [structuredClone(template)])
+        cluster.Recreated.add(L.DeploymentPath)
+        await preparer.PrepareAll(L.Tenant)
+        assert.deepEqual(LiveIdp.Keys(cluster), all)
+        // Rolled out: the new pod ready and available, alone.
+        cluster.Readies = () => true
+        await preparer.PrepareAll(L.Tenant)
         assert.deepEqual(LiveIdp.Keys(cluster), ['configuration.json', L.EntryKey('0.2.6')].sort())
     })
 })

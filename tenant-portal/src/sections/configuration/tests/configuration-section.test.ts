@@ -14,18 +14,34 @@ import { ConfigurationSettingRowViewModel, ConfigurationTargetRowViewModel } fro
 import type { IConfigurationApplyWait } from '../configuration-apply-wait.js'
 import type { ConfigurationApplyDto } from '../../../tenant-types.js'
 
-// Waits nothing; runs `OnWait` (the console coming back, the apply settling) before each read that follows a wait.
+// A simulated clock: a delay passes at once and moves Now on; runs `OnWait` (the console coming back, the apply settling)
+// before each read that follows a delay. A read's timeout never fires unless `TimeoutsFire` (then it moves Now on too).
 class InstantWait implements IConfigurationApplyWait
 {
     public Waits = 0
+    public Clock = 0
+    public TimeoutsFire = false
     public readonly Delays: number[] = []
     public OnWait: (wait: number) => void = () => undefined
+
+    public Now(): number
+    {
+        return this.Clock
+    }
 
     public async Delay(ms: number): Promise<void>
     {
         this.Waits++
+        this.Clock += ms
         this.Delays.push(ms)
         this.OnWait(this.Waits)
+    }
+
+    public Timeout(ms: number): Promise<void>
+    {
+        if (!this.TimeoutsFire) return new Promise<void>(() => undefined)
+        this.Clock += ms
+        return Promise.resolve()
     }
 }
 
@@ -355,11 +371,11 @@ describe('ComponentConfigurationPageViewModel', () =>
         fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(502, 'Request failed: 502'))
         // The console is gone for two reads (the ingress's 502, then no answer at all), then answers with its apply still
         // being proven, then applied.
-        fx.Api.FailNext.set('GetConfigurationComponent', [new ApiError(502, 'Request failed: 502'), new TypeError('Failed to fetch')])
         const texts: string[] = []
         wait.OnWait = n =>
         {
             texts.push(page.ApplyingText)
+            if (n === 1) fx.Api.FailNext.set('GetConfigurationComponent', [new ApiError(502, 'Request failed: 502'), new TypeError('Failed to fetch')])
             if (n === 3) fx.SettleConsoleApply(ConfigurationApplyOutcome.Pending)
             if (n === 4) fx.SettleConsoleApply(ConfigurationApplyOutcome.Applied)
         }
@@ -409,13 +425,72 @@ describe('ComponentConfigurationPageViewModel', () =>
         const wait = new InstantWait()
         const page = await fx.Console(wait)
         fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(504, 'Request failed: 504'))
-        fx.Api.FailOn.set('GetConfigurationComponent', new ApiError(503, 'Request failed: 503'))
+        wait.OnWait = n => { if (n === 1) fx.Api.FailOn.set('GetConfigurationComponent', new ApiError(503, 'Request failed: 503')) }
         page.ApplyCommand.Execute()
         for (let i = 0; i < 20 && page.IsApplying; i++) await Tick.Settle()
         assert.equal(wait.Waits, 100)
         assert.equal(wait.Delays.reduce((a, b) => a + b, 0), 5 * 60 * 1000)
         assert.equal(page.NoticeText, 'The console did not answer within five minutes: reload this page to see how the apply ended.')
         assert.equal(page.IsApplying, false)
+    })
+
+    it('the five minutes are a deadline from the click: a read the ingress holds open times out after 10 s and counts against it (review I5)', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new TypeError('Failed to fetch'))
+        wait.TimeoutsFire = true
+        wait.OnWait = () => fx.Api.HangNext.set('GetConfigurationComponent', 1)
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 20 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(wait.Waits, 24, 'each try: 3 s apart plus a 10 s read, until 300 s have passed')
+        assert.ok(wait.Clock >= 5 * 60 * 1000 && wait.Clock < 5 * 60 * 1000 + 13000)
+        assert.equal(page.NoticeText, 'The console did not answer within five minutes: reload this page to see how the apply ended.')
+    })
+
+    it('an ingress 404 without the console\'s JSON body is the console gone; a 404 the console answers is an error (review M1)', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(404, 'Request failed: 404'))
+        wait.OnWait = n => { if (n === 1) fx.SettleConsoleApply(ConfigurationApplyOutcome.Applied) }
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.deepEqual([page.NoticeText, page.CommandErrorText], ['Applied version 2 to pragmatic-system.', ''])
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(404, 'unknown version', 'not-found', { error: 'unknown version', code: 'not-found' }))
+        page.ApplyCommand.Execute()
+        await Tick.Settle()
+        assert.equal(page.CommandErrorText, 'unknown version')
+    })
+
+    it('leaving the page stops the wait: no more reads, no notice (review M2)', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(502, 'Request failed: 502'))
+        wait.OnWait = n => { if (n === 2) page.OnHidden() }
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(wait.Waits, 2)
+        assert.deepEqual([page.IsApplying, page.NoticeText, page.CommandErrorText], [false, '', ''])
+        page.OnShown()
+    })
+
+    it('an apply of the same version to the same target recorded before the click (another admin) is not taken for this one (review M3)', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        // Recorded after the page loaded, so the page's own list does not hold it.
+        fx.SettleConsoleApply(ConfigurationApplyOutcome.Applied, null, 'apply-other-admin')
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(502, 'Request failed: 502'))
+        wait.OnWait = n => { if (n === 2) fx.SettleConsoleApply(ConfigurationApplyOutcome.Failed, ConfigurationApplyDetails.RolloutNotReady) }
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(page.NoticeText, 'Version 2 did not become ready on pragmatic-system: the previous configuration is running again.')
     })
 
     it("another component's 502, or a refusal of the console's own apply, is still an error", async () =>

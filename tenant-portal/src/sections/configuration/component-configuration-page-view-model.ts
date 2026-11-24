@@ -3,6 +3,7 @@ import { ApiError } from '../../tenant-api-client.js'
 import { AdminCapability } from '../../shell/admin-capability.js'
 import { OptionViewModel } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantPageViewModel } from '../../shell/tenant-page-view-model.js'
+import { ShownPage, type IShownPage } from '../../shell/shown-page.js'
 import type { TenantSessionService } from '../../shell/tenant-session-service.js'
 import { ConfigurationApplyDetails, ConfigurationApplyOutcome } from '../../tenant-types.js'
 import type { ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationDiffDto, ConfigurationPreparationDto, ConfigurationTargetDto } from '../../tenant-types.js'
@@ -17,7 +18,7 @@ import { ConfigurationApplyRowViewModel, ConfigurationChangeRowViewModel, Config
 // edited as JSON from the head, and applying a version to one of its target environments. The server stays the
 // gate: it validates every saved document (secret settings take secret references, never values) and refuses a save
 // based on a head that has moved.
-export class ComponentConfigurationPageViewModel extends TenantPageViewModel
+export class ComponentConfigurationPageViewModel extends TenantPageViewModel implements IShownPage
 {
     private static readonly SettingRowsProperty = 'SettingRows'
     private static readonly VersionRowsProperty = 'VersionRows'
@@ -70,12 +71,16 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private static readonly ConsoleApplyingSuffix = ': the console restarts with it, and this page waits until it answers. A configuration it cannot start with is put back.'
     private static readonly ConsoleRestartingSuffix = '… the console is restarting; this page reconnects when it answers, then shows the outcome.'
     private static readonly RestartTimeoutText = 'The console did not answer within five minutes: reload this page to see how the apply ended.'
-    /** Between reads while the console its own apply restarted comes back, and how many reads (five minutes in all: the
-     *  console proves itself for up to 180 s after the request, 30 s more after a late start). */
+    /** Between reads while the console its own apply restarted comes back; how long one read may take; and the deadline
+     *  from the click (five minutes: the console proves itself for up to 180 s after the request, 30 s more after a late
+     *  start). */
     private static readonly RestartPollMs = 3000
-    private static readonly RestartPolls = 100
+    private static readonly RestartReadTimeoutMs = 10_000
+    private static readonly RestartDeadlineMs = 5 * 60 * 1000
     /** What the ingress answers while the console's pod is gone (bad gateway, unavailable, gateway timeout). */
     private static readonly DroppedStatuses: readonly number[] = [502, 503, 504]
+    /** An ingress with no backend at all answers 404 without the console's JSON error body. */
+    private static readonly NoBackendStatus = 404
     private static readonly RevertedPrefix = 'Version '
     private static readonly RevertedInfix = ' did not become ready on '
     private static readonly RevertedSuffix = ': the previous configuration is running again.'
@@ -110,6 +115,8 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private readonly secretCommand: RelayCommand
     private applying = false
     private restarting = false
+    /** The page left the screen while waiting for the restarted console: the wait stops, nothing more is shown. */
+    private hidden = false
     private secretName = ComponentConfigurationPageViewModel.NoText
     private secretValue = ComponentConfigurationPageViewModel.NoText
     private detail: ConfigurationComponentDetailDto | undefined
@@ -145,6 +152,18 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         this.secretCommand = this.MutatingCommand(AdminCapability.Settings, () => this.WriteSecret(),
             () => this.selectedTarget !== undefined && this.secretName.trim() !== ComponentConfigurationPageViewModel.NoText && this.secretValue !== ComponentConfigurationPageViewModel.NoText)
         this.editor.PropertyChanged(ComponentConfigurationPageViewModel.EditorTextProperty).subscribe(() => this.RaiseMutatingCommandsChanged())
+        ShownPage.Register(this)
+    }
+
+    public OnShown(): void
+    {
+        this.hidden = false
+    }
+
+    // Leaving the page stops a wait for the restarted console: its outcome is in the applies when the page is opened again.
+    public OnHidden(): void
+    {
+        this.hidden = true
     }
 
     public get Title(): string
@@ -627,18 +646,24 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         }
         const P = ComponentConfigurationPageViewModel
         this.SetNotice(P.NoText)
-        const known = new Set((this.detail?.applies ?? []).map(a => a.id))
         this.SetApplying(true)
+        let record: ConfigurationApplyDto | undefined
+        let stopped = false
         try
         {
-            const record = await this.ApplyAndAwait(version, environment, known)
-            this.SetNotice(record === undefined ? P.RestartTimeoutText : P.ApplyNotice(record))
+            record = await this.ApplyAndAwait(version, environment)
+            stopped = this.hidden
         }
         finally
         {
             this.SetRestarting(false)
             this.SetApplying(false)
         }
+        if (stopped)
+        {
+            return
+        }
+        this.SetNotice(record === undefined ? P.RestartTimeoutText : P.ApplyNotice(record))
         await this.Refresh()
     }
 
@@ -646,10 +671,13 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     // the request that started it is usually cut (the ingress answers 502, or nothing answers): that is expected, and the
     // page then waits for the console to answer again and reads how the apply ended (the restarted console proves itself,
     // then records it). Undefined when the console did not answer in time. Any other component's failure stays an error.
-    private async ApplyAndAwait(version: number, environment: string, known: ReadonlySet<string>): Promise<ConfigurationApplyDto | undefined>
+    private async ApplyAndAwait(version: number, environment: string): Promise<ConfigurationApplyDto | undefined>
     {
         const P = ComponentConfigurationPageViewModel
         const own = this.component === P.ConsoleComponent
+        const deadline = this.wait.Now() + P.RestartDeadlineMs
+        // The applies there are now, read just before sending: only one recorded after it can be this one.
+        const known = own ? new Set((await this.Session.Client.GetConfigurationComponent(this.component)).applies.map(a => a.id)) : new Set<string>()
         let record: ConfigurationApplyDto
         try
         {
@@ -661,32 +689,25 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
             {
                 throw e
             }
-            return await this.AwaitOwnApply(version, environment, known, undefined)
+            return await this.AwaitOwnApply(version, environment, known, undefined, deadline)
         }
-        return own && record.outcome === ConfigurationApplyOutcome.Pending ? await this.AwaitOwnApply(version, environment, known, record.id) : record
+        return own && record.outcome === ConfigurationApplyOutcome.Pending ? await this.AwaitOwnApply(version, environment, known, record.id, deadline) : record
     }
 
     // Reads the component until the console answers with the apply settled: the record `id` names, or, when the request
-    // was cut before it answered, the one apply of that version to that target this page had not seen before.
-    private async AwaitOwnApply(version: number, environment: string, known: ReadonlySet<string>, id: string | undefined): Promise<ConfigurationApplyDto | undefined>
+    // was cut before it answered, the one apply of that version to that target recorded since the click. A read that takes
+    // longer than RestartReadTimeoutMs counts as unanswered. Stops at the deadline, or when the page leaves the screen.
+    private async AwaitOwnApply(version: number, environment: string, known: ReadonlySet<string>, id: string | undefined, deadline: number): Promise<ConfigurationApplyDto | undefined>
     {
         const P = ComponentConfigurationPageViewModel
         this.SetRestarting(true)
-        for (let poll = 0; poll < P.RestartPolls; poll++)
+        while (!this.hidden && this.wait.Now() < deadline)
         {
             await this.wait.Delay(P.RestartPollMs)
-            let detail: ConfigurationComponentDetailDto
-            try
+            const detail = await this.ReadOrUnanswered()
+            if (detail === undefined)
             {
-                detail = await this.Session.Client.GetConfigurationComponent(this.component)
-            }
-            catch (e)
-            {
-                if (P.IsDropped(e))
-                {
-                    continue
-                }
-                throw e
+                continue
             }
             const record = detail.applies.find(a => id !== undefined ? a.id === id : !known.has(a.id) && a.version === version && a.environment === environment)
             if (record !== undefined && record.outcome !== ConfigurationApplyOutcome.Pending)
@@ -697,6 +718,25 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         return undefined
     }
 
+    // The component, or undefined while the console does not answer (dropped, or the read timed out).
+    private async ReadOrUnanswered(): Promise<ConfigurationComponentDetailDto | undefined>
+    {
+        const P = ComponentConfigurationPageViewModel
+        const timedOut = this.wait.Timeout(P.RestartReadTimeoutMs).then(() => undefined)
+        try
+        {
+            return await Promise.race([this.Session.Client.GetConfigurationComponent(this.component), timedOut])
+        }
+        catch (e)
+        {
+            if (P.IsDropped(e))
+            {
+                return undefined
+            }
+            throw e
+        }
+    }
+
     private SetRestarting(next: boolean): void
     {
         const P = ComponentConfigurationPageViewModel
@@ -705,10 +745,14 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         this.RaiseIfChanged(P.ApplyingTextProperty, oldText, this.ApplyingText)
     }
 
-    // A request the console's restart cut: the ingress's gateway answers, or no answer at all (fetch rejects with a TypeError).
+    // A request the console's restart cut: the ingress's gateway answers (or its 404 without the console's JSON body, no
+    // backend at all), or no answer at all (fetch itself rejects with a TypeError; the client wraps nothing else in one: a
+    // body that does not parse is a SyntaxError, a refusal an ApiError).
     private static IsDropped(error: unknown): boolean
     {
-        return error instanceof ApiError ? ComponentConfigurationPageViewModel.DroppedStatuses.includes(error.Status) : error instanceof TypeError
+        const P = ComponentConfigurationPageViewModel
+        if (!(error instanceof ApiError)) return error instanceof TypeError
+        return P.DroppedStatuses.includes(error.Status) || (error.Status === P.NoBackendStatus && error.Body === undefined)
     }
 
     private SetApplying(next: boolean): void

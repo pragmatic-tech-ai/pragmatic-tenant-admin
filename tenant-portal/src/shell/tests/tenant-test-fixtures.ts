@@ -163,6 +163,8 @@ export class FakeTenantApi
     public readonly FailOn = new Map<string, Error>()
     // Errors the next calls of a named method reject with, one per call, before FailOn (a console that is restarting).
     public readonly FailNext = new Map<string, Error[]>()
+    // How many next calls of a named method never answer (a request the ingress holds open).
+    public readonly HangNext = new Map<string, number>()
     public readonly Calls: Array<[string, ...unknown[]]> = []
     // Push delivers a chunk; Late delivers one even after the stream closed (a
     // frame already in flight); ServerClose closes it from the server side.
@@ -654,6 +656,12 @@ export class FakeTenantApi
     {
         this.Calls.push([method, ...args])
         await Promise.resolve()
+        const hangs = this.HangNext.get(method) ?? 0
+        if (hangs > 0)
+        {
+            this.HangNext.set(method, hangs - 1)
+            await new Promise<void>(() => undefined)
+        }
         const failure = this.FailNext.get(method)?.shift() ?? this.FailOn.get(method) ?? this.Failure
         if (failure !== undefined)
         {

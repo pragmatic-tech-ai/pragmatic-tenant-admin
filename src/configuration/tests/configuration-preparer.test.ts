@@ -55,8 +55,9 @@ class PrepareWorld
         const W = PrepareWorld
         const cluster = new FakeCluster()
         cluster.Put(W.DeploymentPath, {
-            apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: W.Namespace, namespace: W.Namespace },
+            apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name: W.Namespace, namespace: W.Namespace, generation: 1 },
             spec: { replicas: 1, template: { metadata: { annotations: applied === undefined ? {} : AppliedConfigurationCodec.PodTemplateAnnotations(applied) }, spec: { containers: [{ name: 'idp', image: 'idp:0.2.1' }] } } },
+            status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 1 },
         })
         if (applied !== undefined)
         {

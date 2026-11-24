@@ -51,6 +51,12 @@ export interface IApplyPreparation
     PrepareApplied(applied: AppliedConfiguration, target: ApplyTarget): Promise<PreparationReport | undefined>
 }
 
+type DeploymentStatusShape = {
+    metadata?: { generation?: unknown }
+    spec?: { replicas?: unknown }
+    status?: { observedGeneration?: unknown; replicas?: unknown; updatedReplicas?: unknown; availableReplicas?: unknown; unavailableReplicas?: unknown }
+}
+
 type ConfigMapShape = { metadata?: { name?: unknown; namespace?: unknown; resourceVersion?: unknown; labels?: Record<string, unknown>; annotations?: Record<string, unknown> }; data?: Record<string, unknown> }
 
 /**
@@ -83,6 +89,8 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
     /** The author of a version the console saves itself when preparing (a realm subject cannot be named here). */
     public static readonly Author = 'pragmatic-tenant-admin'
     private static readonly ConfigMapType = { apiVersion: 'v1', kind: 'ConfigMap' }
+    private static readonly DeploymentType = { apiVersion: 'apps/v1', kind: 'Deployment' }
+    private static readonly DefaultReplicas = 1
     private static readonly OptionsPointer = '/options/'
     private static readonly PointerSeparator = '/'
     private static readonly EscapedSlash = /~1/g
@@ -254,18 +262,27 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
         }
         if (applied.Realm !== tenantId || applied.Component !== component) return new PreparationReport(component, target, PreparationResult.Skipped)
         const digest = descriptor.ContentDigest()
-        if (applied.DescriptorDigest === digest) return new PreparationReport(component, target, PreparationResult.Current)
+        const entries = P.EntriesOf(map)
+        const status = ConfigurationPreparationStatus.Of(map.metadata?.annotations).DerivedFrom(applied.ContentHash())
+        if (applied.DescriptorDigest === digest)
+        {
+            // The applied file serves the release: entries left from earlier releases (an apply keeps them, R3) go too.
+            const stale = await this.Obsolete(entries, digest, target)
+            if (stale.length > 0)
+            {
+                await this.Write(path, AppliedConfigurationEntries.Without(P.Writable(map, component, target, status, applied), stale))
+                this.LogDroppedEntries(component, target, entries, stale)
+            }
+            return new PreparationReport(component, target, PreparationResult.Current)
+        }
         if (ComponentVersionOrder.Compare(descriptor.Version, applied.ComponentVersion) === undefined)
         {
             this.Log(component, target, P.LogUnordered + applied.ComponentVersion + P.LogAnd + descriptor.Version)
             return new PreparationReport(component, target, PreparationResult.Ahead)
         }
         if (!ComponentVersionOrder.IsNewer(descriptor.Version, applied.ComponentVersion)) return new PreparationReport(component, target, PreparationResult.Ahead)
-        const entries = P.EntriesOf(map)
-        // What was prepared from another applied file is stale; entries for descriptors nobody runs or rolls to go.
-        const status = ConfigurationPreparationStatus.Of(map.metadata?.annotations).DerivedFrom(applied.ContentHash())
-        // Only when what the target runs is known: an entry its pods may run from is never dropped on a guess.
-        const obsolete = target.DescriptorDigest === undefined ? [] : [...entries.keys()].filter(d => d !== digest && d !== target.DescriptorDigest)
+        // What was prepared from another applied file is stale (status above); entries for descriptors nobody runs or rolls to go.
+        const obsolete = await this.Obsolete(entries, digest, target)
         const base = AppliedConfigurationEntries.Without(P.Writable(map, component, target, status, applied), obsolete)
         const existing = entries.get(digest)
         if (status.IsPrepared(digest) && existing !== undefined && existing.Realm === applied.Realm && existing.Component === component && new ConfigurationValidator(descriptor).Validate(existing.Document).Valid)
@@ -365,6 +382,41 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
     private async Write(path: string, map: IAppliedConfigMap): Promise<void>
     {
         await this.client.Apply(path, map, KubeConfigurationApplier.FieldManager)
+    }
+
+    // The entries neither the release's (`digest`) nor what the target runs: only when what it runs is known and its roll
+    // has finished, so an entry pods may still run from (old pods of a surge roll that has not finished, a roll the
+    // installer may still put back) is never dropped.
+    private async Obsolete(entries: ReadonlyMap<string, AppliedConfiguration>, digest: string, target: ConfigurationTarget): Promise<string[]>
+    {
+        const running = target.DescriptorDigest
+        if (running === undefined) return []
+        const obsolete = [...entries.keys()].filter(d => d !== digest && d !== running)
+        if (obsolete.length === 0 || !await this.RolledOut(target)) return []
+        return obsolete
+    }
+
+    // Whether the target's Deployment has finished its roll: every replica updated and available, none left over. A
+    // Deployment that cannot be read counts as rolling.
+    private async RolledOut(target: ConfigurationTarget): Promise<boolean>
+    {
+        const P = ConfigurationPreparer
+        let deployment: DeploymentStatusShape | undefined
+        try
+        {
+            deployment = await this.client.Get(KubeResourceCatalog.PathOf(P.DeploymentType, target.Target.Namespace, target.Target.Deployment)) as DeploymentStatusShape | undefined
+        }
+        catch
+        {
+            return false
+        }
+        const status = deployment?.status
+        if (status === undefined) return false
+        const wanted = typeof deployment?.spec?.replicas === 'number' ? deployment.spec.replicas : P.DefaultReplicas
+        const generation = deployment?.metadata?.generation
+        const observed = typeof status.observedGeneration === 'number' && typeof generation === 'number' && status.observedGeneration >= generation
+        const unavailable = typeof status.unavailableReplicas === 'number' ? status.unavailableReplicas : 0
+        return observed && status.updatedReplicas === wanted && status.replicas === wanted && status.availableReplicas === wanted && unavailable === 0
     }
 
     // One line naming the component versions whose entries a write just dropped (none: no line).
