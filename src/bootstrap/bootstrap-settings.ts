@@ -18,7 +18,7 @@ export class BootstrapSettings
     public static readonly BaseDomainEnv = 'PRAGMATIC_BOOTSTRAP_BASE_DOMAIN'
     public static readonly IdpHostEnv = 'PRAGMATIC_BOOTSTRAP_IDP_HOST'
     public static readonly IdpInternalHostEnv = 'PRAGMATIC_BOOTSTRAP_IDP_INTERNAL_HOST'
-    public static readonly PostgresHostEnv = 'PRAGMATIC_BOOTSTRAP_POSTGRES_HOST'
+    public static readonly LevelEnv = 'PRAGMATIC_BOOTSTRAP_LEVEL'
     public static readonly TlsModeEnv = 'PRAGMATIC_BOOTSTRAP_TLS_MODE'
     public static readonly TlsSecretEnv = 'PRAGMATIC_BOOTSTRAP_TLS_SECRET'
     public static readonly OwnerEmailEnv = 'PRAGMATIC_BOOTSTRAP_OWNER_EMAIL'
@@ -26,6 +26,7 @@ export class BootstrapSettings
     private static readonly BadModePrefix = 'PRAGMATIC_BOOTSTRAP_TLS_MODE has an unknown value: '
     private static readonly NoTlsSecret = 'tls.mode=secret needs tls.secretName (PRAGMATIC_BOOTSTRAP_TLS_SECRET)'
     private static readonly Empty = ''
+    private static readonly StandaloneLevel = 'standalone'
 
     private constructor(
         public readonly Namespace: string,
@@ -38,7 +39,7 @@ export class BootstrapSettings
         public readonly BaseDomain: string,
         public readonly IdpHost: string,
         public readonly IdpInternalHost: string,
-        public readonly PostgresHost: string,
+        public readonly Standalone: boolean,
         public readonly Tls: EngineTlsMode,
         public readonly TlsSecret: string | undefined,
         public readonly OwnerEmail: string,
@@ -79,7 +80,7 @@ export class BootstrapSettings
             S.Required(env, S.BaseDomainEnv),
             S.Required(env, S.IdpHostEnv),
             S.Required(env, S.IdpInternalHostEnv),
-            S.Required(env, S.PostgresHostEnv),
+            S.Optional(env, S.LevelEnv) === S.StandaloneLevel,
             tls,
             tls === EngineTlsMode.Secret ? tlsSecret : undefined,
             S.Required(env, S.OwnerEmailEnv),

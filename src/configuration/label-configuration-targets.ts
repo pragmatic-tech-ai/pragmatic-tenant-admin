@@ -32,7 +32,7 @@ export interface IDescriptorVersions
 
 type DeploymentShape = {
     metadata?: { name?: unknown; labels?: Record<string, unknown> }
-    spec?: { template?: { spec?: { containers?: ContainerShape[]; initContainers?: ContainerShape[] } } }
+    spec?: { template?: { metadata?: { labels?: Record<string, unknown> }; spec?: { containers?: ContainerShape[]; initContainers?: ContainerShape[] } } }
 }
 type ContainerShape = { name?: unknown; image?: unknown }
 
@@ -93,9 +93,16 @@ export class LabelConfigurationTargets implements IConfigurationTargetSource
         const fixed = this.namespaces.FixedDeployment(component, namespace)
         if (fixed === undefined) return this.kube.List(KubeResourceCatalog.PathOf(L.DeploymentType, namespace), selector)
         const found = await this.kube.Get(KubeResourceCatalog.PathOf(L.DeploymentType, namespace, fixed)) as DeploymentShape | undefined
-        const labels = found?.metadata?.labels
-        const labelled = ComponentConfigurationMounts.ContainerOf(labels, component) !== undefined && labels?.[ComponentConfigurationMounts.ManagedByLabel] === ComponentConfigurationMounts.ManagedBy
-        return found !== undefined && labelled ? [found] : []
+        return found !== undefined && (L.Labelled(found.metadata?.labels, component) || L.Labelled(found.spec?.template?.metadata?.labels, component)) ? [found] : []
+    }
+
+    /**
+     * Whether labels mark `component`'s target (its container label, managed by the console). A chart-installed engine's
+     * Deployment carries them on its pod template: Helm sets `app.kubernetes.io/managed-by: Helm` on the Deployment itself.
+     */
+    private static Labelled(labels: Record<string, unknown> | undefined, component: string): boolean
+    {
+        return ComponentConfigurationMounts.ContainerOf(labels, component) !== undefined && labels?.[ComponentConfigurationMounts.ManagedByLabel] === ComponentConfigurationMounts.ManagedBy
     }
 
     // Names shared by two targets become their namespaces, and names still shared then `<namespace>/<deployment>`.

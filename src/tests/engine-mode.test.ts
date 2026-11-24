@@ -49,7 +49,8 @@ describe('engine mode', () =>
     it('the engine composition takes both release images or neither', () =>
     {
         const both = EngineComposition.From({ [EngineEnv.EnvServerImage]: 'server@sha256:a', [EngineEnv.UiUnpackImage]: 'unpack@sha256:b' })
-        assert.deepEqual(both.Environment, { ServerImage: 'server@sha256:a', UiUnpackImage: 'unpack@sha256:b' })
+        assert.deepEqual(both.Environment, { ServerImage: 'server@sha256:a', UiUnpackImage: 'unpack@sha256:b', IngressClass: undefined })
+        assert.equal(EngineComposition.From({ [EngineEnv.EnvServerImage]: 'server@sha256:a', [EngineEnv.UiUnpackImage]: 'unpack@sha256:b', [EngineEnv.IngressClass]: 'traefik' }).Environment?.IngressClass, 'traefik')
         assert.equal(EngineComposition.From({}).Environment, undefined)
         assert.throws(() => EngineComposition.From({ [EngineEnv.EnvServerImage]: 'server@sha256:a' }), /both/)
         assert.equal(EngineComposition.From({ [EngineEnv.Mode]: 'standalone' }).Standalone, true)

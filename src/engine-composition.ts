@@ -1,6 +1,8 @@
 import { PgSession } from '@pragmatic-tech-ai/pragmatic-realm-adapters'
 import { PostgresPoolFactory } from '@pragmatic-tech-ai/pragmatic-realm-custom'
-import type { EngineEnvironment, IIdpService, TenantRecord } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { K8sManifestBuilder, type EngineEnvironment, type IIdpService, type IngressTls, type TenantRecord } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import type { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
+import { IngressTlsCopies } from './ingress-tls-copies.js'
 import { InitialOwnerSeeder } from './bootstrap/initial-owner-seeder.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
 import { HivePostgresProvisioner } from './environments/hive-postgres-provisioner.js'
@@ -16,6 +18,7 @@ export class EngineComposition
 
     private session: PgSession | undefined
     private seeder: InitialOwnerSeeder | undefined
+    private copies: IngressTlsCopies | undefined
 
     private constructor(
         public readonly Mode: EngineMode | undefined,
@@ -34,7 +37,7 @@ export class EngineComposition
         {
             throw new Error(EngineComposition.PartialImages)
         }
-        const environment = server !== undefined && unpack !== undefined ? { ServerImage: server, UiUnpackImage: unpack } : undefined
+        const environment = server !== undefined && unpack !== undefined ? { ServerImage: server, UiUnpackImage: unpack, IngressClass: E.OptionalOf(env, E.IngressClass) } : undefined
         return new EngineComposition(E.ModeOf(env), environment, E.OptionalOf(env, E.HivePostgresUrlFile), E.OptionalOf(env, E.OwnerInitialDir))
     }
 
@@ -56,7 +59,7 @@ export class EngineComposition
         return new HivePostgresProvisioner(this.session)
     }
 
-    /** Starts seeding the realm and its Owner in the background (once; a no-op without the chart's one-time sign-in). */
+    /** Starts seeding the realm and its Owner in the background (once; a no-op without the chart's initial sign-in). */
     public StartOwnerSeeding(idp: IIdpService, tenant: TenantRecord, log: (line: string) => void): void
     {
         if (this.ownerInitialDir === undefined || this.seeder !== undefined)
@@ -67,8 +70,25 @@ export class EngineComposition
         void this.seeder.Run()
     }
 
+    /**
+     * Starts keeping the copies of the console's TLS Secret current in the sign-in service's namespace and every environment's
+     * (a chart-installed engine with its own certificate Secret; a pushed console renews through the platform's install).
+     */
+    public StartTlsCopies(client: KubeApiClient | undefined, tenantId: string, tls: IngressTls | undefined, environments: () => readonly string[], log: (line: string) => void): void
+    {
+        if (this.Mode === undefined || client === undefined || tls?.secretName === undefined || this.copies !== undefined)
+        {
+            return
+        }
+        const namespaces = (): readonly string[] => [K8sManifestBuilder.IdpNameOf(tenantId), ...environments().map(name => K8sManifestBuilder.NamespaceOf(name))]
+        this.copies = new IngressTlsCopies(client, K8sManifestBuilder.SystemNamespace, tls.secretName, namespaces, log)
+        this.copies.Start()
+    }
+
     public async Close(): Promise<void>
     {
+        await this.copies?.Stop()
+        this.copies = undefined
         this.seeder?.Stop()
         const session = this.session
         this.session = undefined

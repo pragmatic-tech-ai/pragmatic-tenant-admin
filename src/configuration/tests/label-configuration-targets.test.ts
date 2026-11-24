@@ -101,6 +101,22 @@ describe('LabelConfigurationTargets', () =>
         assert.ok(!cluster.Calls.some(c => c.path.startsWith('/apis/apps/v1/namespaces/pragmatic-system/deployments?')), 'the namespace is never listed')
     })
 
+    it('finds a chart-installed hive component by its pod template labels (Helm owns the Deployment managed-by label)', async () =>
+    {
+        const cluster = TargetsWorld.Cluster()
+        const labels = { 'component.pragmatic-tech.ai/pragmatic-hive-agent': 'agent', 'app.kubernetes.io/managed-by': 'pragmatic-tenant-admin' }
+        const deployment = TargetsWorld.Deployment('pragmatic-system', 'pragmatic-hive-agent-h1', labels, { agent: 'ghcr.io/x/agent@sha256:' + 'a'.repeat(64) }) as any
+        deployment.metadata.labels['app.kubernetes.io/managed-by'] = 'Helm'
+        deployment.spec.template.metadata = { labels }
+        cluster.Put('/apis/apps/v1/namespaces/pragmatic-system/deployments/pragmatic-hive-agent-h1', deployment)
+        const targets = new LabelConfigurationTargets(new KubeApiClient(cluster), new Namespaces(), new Images({}), { VersionOf: () => undefined })
+        assert.deepEqual((await targets.For(F.Agent, F.Tenant)).map(t => t.Target.Deployment), ['pragmatic-hive-agent-h1'])
+        const bare = TargetsWorld.Deployment('pragmatic-system', 'pragmatic-hive-agent-h1', {}, { agent: 'x' }) as any
+        bare.metadata.labels['app.kubernetes.io/managed-by'] = 'Helm'
+        cluster.Put('/apis/apps/v1/namespaces/pragmatic-system/deployments/pragmatic-hive-agent-h1', bare)
+        assert.deepEqual(await targets.For(F.Agent, F.Tenant), [], 'neither the Deployment nor its template is labelled')
+    })
+
     it('finds nothing for a hive component whose Deployment is absent or is not labelled for the component', async () =>
     {
         const cluster = TargetsWorld.Cluster()

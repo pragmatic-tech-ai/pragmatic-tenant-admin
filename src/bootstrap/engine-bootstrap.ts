@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import { KubeResourceCatalog, type KubeApiClient, type KubeTypeRef } from '@pragmatic-tech-ai/pragmatic-kube'
-import { ConsoleFingerprintKeys, HiveBackend, InfraMode, K8sManifestBuilder, TenantOwner, type TenantDirectorySeed } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { ComponentConfigurationMounts, ConsoleFingerprintKeys, EnvironmentHiveDatabase, HiveBackend, InfraMode, K8sManifestBuilder, TenantOwner, type TenantDirectorySeed } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { ReleaseApp } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import type { BootstrapSettings } from './bootstrap-settings.js'
 import { EngineSecretOrigin, EngineSecretScope, EngineSecretSet, type EngineSecretSpec } from './engine-secret-set.js'
 import type { ITlsMinter, TlsMaterial } from './tls-minter.js'
@@ -53,12 +54,7 @@ export class EngineBootstrap
     private static readonly RsaModulus = 2048
     private static readonly Pkcs8 = 'pkcs8'
     private static readonly Pem = 'pem'
-    private static readonly UrlScheme = 'postgres://'
-    private static readonly UserSeparator = ':'
-    private static readonly HostSeparator = '@'
-    private static readonly PathSeparator = '/'
     private static readonly NamespaceSeparator = '/'
-    private static readonly PostgresPort = 5432
     private static readonly SuperuserRole = 'postgres'
     private static readonly SuperuserDatabase = 'postgres'
     /** The roles and databases of the hive Postgres' applications file (the chart's pragmatic-postgres-applications). */
@@ -77,6 +73,18 @@ export class EngineBootstrap
     private static readonly SecretKind = 'Secret'
     private static readonly NamespaceKind = 'Namespace'
     private static readonly MissingSourcePrefix = 'the bootstrap cannot copy a Secret whose source is absent: '
+    private static readonly UnknownSecretPrefix = 'the bootstrap has no material for the Secret '
+    private static readonly OtherEnginePrefix = 'this cluster already holds the engine of '
+    private static readonly OtherEngineInfix = ' (its kept seed); the install names '
+    private static readonly OtherEngineSuffix = '. A kept engine keeps its tenant and hive ids: install with those, or remove the kept engine first (runbook: customer-cluster.md).'
+    private static readonly IdSeparator = ', hive '
+    private static readonly TenantWord = 'tenant '
+    private static readonly ConfigMapType: KubeTypeRef = { apiVersion: 'v1', kind: 'ConfigMap' }
+    private static readonly ConfigMapKind = 'ConfigMap'
+    /** The components the console configures in the engine's namespace (the agent only when one runs), and the realm sign-in service in its own. */
+    public static readonly ConnectedComponents: readonly string[] = [ReleaseApp.TenantAdmin, ReleaseApp.HiveAgent]
+    public static readonly StandaloneComponents: readonly string[] = [ReleaseApp.TenantAdmin]
+    public static readonly IdpComponents: readonly string[] = [ReleaseApp.TenantIdp]
 
     public constructor(
         private readonly kube: KubeApiClient,
@@ -87,13 +95,34 @@ export class EngineBootstrap
     {
     }
 
+    /**
+     * The first hook step (`bootstrap namespace`): the realm sign-in service's namespace, created when absent, so the
+     * chart's namespaced bootstrap Roles can be bound in it before the Secrets are minted.
+     */
+    public async RunNamespace(): Promise<EngineBootstrapReport>
+    {
+        const created = await this.EnsureNamespace(this.settings.IdpNamespace)
+        return { Created: created ? [this.settings.IdpNamespace] : [], Kept: created ? [] : [this.settings.IdpNamespace], Refreshed: [] }
+    }
+
     public async Run(): Promise<EngineBootstrapReport>
     {
         const B = EngineBootstrap
         const S = EngineSecretSet
         const s = this.settings
         const report = { Created: [] as string[], Kept: [] as string[], Refreshed: [] as string[] }
+        await this.RefuseAnotherEngine()
         await this.EnsureNamespace(s.IdpNamespace)
+        // The empty configuration objects the console writes each component's applied configuration into: created when
+        // absent and otherwise never touched (not chart-owned, so an upgrade never drops what the console wrote).
+        const engineComponents = s.Standalone ? B.StandaloneComponents : B.ConnectedComponents
+        for (const [namespace, components] of [[s.Namespace, engineComponents], [s.IdpNamespace, B.IdpComponents]] as const)
+        {
+            for (const component of components)
+            {
+                await this.EnsureConfigurationObjects(namespace, component, report)
+            }
+        }
         for (const spec of S.Specs(s.SelfSigned, s.TlsSecret))
         {
             const namespace = this.NamespaceOf(spec)
@@ -115,7 +144,31 @@ export class EngineBootstrap
         return report
     }
 
-    /** Creates a minted Secret when absent; false (kept, untouched) when one exists. */
+    /**
+     * A kept engine keeps its ids: its seed names the tenant (the realm id) and hive its sealed data belongs to, and a new
+     * tenant's sign-in service would mint new keys over a database sealed with the old ones. Refused before anything is
+     * written, naming both.
+     */
+    private async RefuseAnotherEngine(): Promise<void>
+    {
+        const B = EngineBootstrap
+        const s = this.settings
+        const kept = await this.kube.Get(this.SecretPath(s.Namespace, EngineSecretSet.TenantAdminSeed)) as SecretBody | undefined
+        const encoded = kept?.data?.[EngineSecretSet.SeedKey]
+        if (encoded === undefined)
+        {
+            return
+        }
+        const seed = JSON.parse(Buffer.from(encoded, B.Base64).toString(B.Utf8)) as { tenant?: { id?: unknown }; hives?: Array<{ id?: unknown }> }
+        const tenant = String(seed.tenant?.id)
+        const hive = String(seed.hives?.[0]?.id)
+        if (tenant !== s.TenantId || hive !== s.HiveId)
+        {
+            throw new Error(B.OtherEnginePrefix + B.TenantWord + tenant + B.IdSeparator + hive + B.OtherEngineInfix + B.TenantWord + s.TenantId + B.IdSeparator + s.HiveId + B.OtherEngineSuffix)
+        }
+    }
+
+    /** Creates a minted Secret when absent (looked up first, so nothing is minted for a kept one); false (kept, untouched) when one exists. */
     private async CreateMinted(namespace: string, spec: EngineSecretSpec): Promise<boolean>
     {
         const S = EngineSecretSet
@@ -123,31 +176,34 @@ export class EngineBootstrap
         {
             return await this.CreateConsoleTls(namespace, spec)
         }
+        if (await this.kube.Get(this.SecretPath(namespace, spec.Name)) !== undefined)
+        {
+            return false
+        }
         return await this.kube.Create(this.CollectionPath(namespace), this.SecretOf(namespace, spec, this.Mint(spec)))
     }
 
     /**
-     * The self-signed console certificate (console, sign-in service and every environment of the base domain) and its CA:
-     * minted as a pair only when the certificate is absent; the CA Secret then follows the new certificate. An existing
-     * certificate is kept with whatever CA it came with.
+     * The self-signed console certificate (console, sign-in service and every environment of the base domain) and its CA,
+     * kept only as a pair: when either is missing (a crash between the two writes) both are minted again, the CA first, then
+     * the certificate, so the CA Secret always names the issuer of the certificate it sits beside.
      */
     private async CreateConsoleTls(namespace: string, spec: EngineSecretSpec): Promise<boolean>
     {
         const S = EngineSecretSet
         const B = EngineBootstrap
         const s = this.settings
-        if (await this.kube.Get(this.SecretPath(namespace, spec.Name)) !== undefined)
+        const certificate = await this.kube.Get(this.SecretPath(namespace, spec.Name))
+        const ca = await this.kube.Get(this.SecretPath(namespace, S.DevCa))
+        if (certificate !== undefined && ca !== undefined)
         {
             return false
         }
         const material = this.tls.Mint([s.ConsoleHost, s.IdpHost, B.WildcardPrefix + s.BaseDomain])
-        const created = await this.kube.Create(this.CollectionPath(namespace), this.SecretOf(namespace, spec, { [S.TlsCertKey]: material.Cert, [S.TlsKeyKey]: material.Key }))
-        if (created)
-        {
-            const ca: EngineSecretSpec = { Name: S.DevCa, Scope: EngineSecretScope.Engine, Keys: [S.CaKey], Type: S.OpaqueType, Origin: EngineSecretOrigin.Minted }
-            await this.Apply(namespace, ca, { [S.CaKey]: material.Ca })
-        }
-        return created
+        const caSpec: EngineSecretSpec = { Name: S.DevCa, Scope: EngineSecretScope.Engine, Keys: [S.CaKey], Type: S.OpaqueType, Origin: EngineSecretOrigin.Minted }
+        await this.Apply(namespace, caSpec, { [S.CaKey]: material.Ca })
+        await this.Apply(namespace, spec, { [S.TlsCertKey]: material.Cert, [S.TlsKeyKey]: material.Key })
+        return true
     }
 
     /** Fresh material for one minted Secret. */
@@ -180,7 +236,7 @@ export class EngineBootstrap
             case S.IdpTls:
                 return B.IdpTlsData(this.tls.Mint([s.IdpInternalHost, s.IdpHost]))
             default:
-                throw new Error(B.MissingSourcePrefix + spec.Name)
+                throw new Error(B.UnknownSecretPrefix + spec.Name)
         }
     }
 
@@ -219,14 +275,39 @@ export class EngineBootstrap
         return Buffer.from(value, B.Base64)
     }
 
-    private async EnsureNamespace(name: string): Promise<void>
+    private async EnsureConfigurationObjects(namespace: string, component: string, report: { Created: string[]; Kept: string[] }): Promise<void>
+    {
+        const B = EngineBootstrap
+        const metadata = (name: string): object => ({
+            [B.NameKey]: name,
+            [B.NamespaceKey]: namespace,
+            [B.LabelsKey]: {
+                ...K8sManifestBuilder.HiveLabelsOf(this.settings.HiveId),
+                [ComponentConfigurationMounts.ComponentLabel]: component,
+                [ComponentConfigurationMounts.ManagedByLabel]: ComponentConfigurationMounts.ManagedBy,
+            },
+        })
+        const configMap = ComponentConfigurationMounts.ConfigMapNameOf(component)
+        const secret = ComponentConfigurationMounts.SecretNameOf(component)
+        const madeMap = await this.kube.Create(KubeResourceCatalog.PathOf(B.ConfigMapType, namespace), {
+            [B.ApiVersionKey]: B.ConfigMapType.apiVersion, [B.KindKey]: B.ConfigMapKind, [B.MetadataKey]: metadata(configMap),
+        })
+        ;(madeMap ? report.Created : report.Kept).push(namespace + B.NamespaceSeparator + configMap)
+        const madeSecret = await this.kube.Create(this.CollectionPath(namespace), {
+            [B.ApiVersionKey]: B.SecretType.apiVersion, [B.KindKey]: B.SecretKind, [B.MetadataKey]: metadata(secret), [B.TypeKey]: EngineSecretSet.OpaqueType,
+        })
+        ;(madeSecret ? report.Created : report.Kept).push(namespace + B.NamespaceSeparator + secret)
+    }
+
+    /** Creates the namespace when absent; answers whether this call created it. */
+    private async EnsureNamespace(name: string): Promise<boolean>
     {
         const B = EngineBootstrap
         if (await this.kube.Get(KubeResourceCatalog.PathOf(B.NamespaceType, undefined, name)) !== undefined)
         {
-            return
+            return false
         }
-        await this.kube.Create(KubeResourceCatalog.PathOf(B.NamespaceType, undefined), {
+        return await this.kube.Create(KubeResourceCatalog.PathOf(B.NamespaceType, undefined), {
             [B.ApiVersionKey]: B.NamespaceType.apiVersion,
             [B.KindKey]: B.NamespaceKind,
             [B.MetadataKey]: { [B.NameKey]: name, [B.LabelsKey]: this.Labels(), [B.AnnotationsKey]: EngineBootstrap.KeepAnnotations() },
@@ -255,6 +336,10 @@ export class EngineBootstrap
         return { ...K8sManifestBuilder.HiveLabelsOf(this.settings.HiveId), [EngineSecretSet.ManagedByLabel]: EngineSecretSet.ManagedByValue }
     }
 
+    /**
+     * `helm.sh/resource-policy: keep`. Helm never owns these Secrets (the hook Job made them), so uninstall leaves them anyway;
+     * the annotation states the intent where an operator reads it, and protects them should a later chart ever adopt one.
+     */
     private static KeepAnnotations(): Record<string, string>
     {
         return { [EngineSecretSet.KeepAnnotation]: EngineSecretSet.KeepValue }
@@ -275,13 +360,11 @@ export class EngineBootstrap
         return KubeResourceCatalog.PathOf(EngineBootstrap.SecretType, namespace, name)
     }
 
-    /** A role's password and its URL on the hive Postgres Service. */
+    /** A role's password and its URL on the hive Postgres Service (EnvironmentHiveDatabase: the one URL form and host). */
     private DatabaseSecret(role: string, database: string): SecretData
     {
-        const B = EngineBootstrap
-        const password = this.Text(B.PasswordBytes)
-        const url = B.UrlScheme + role + B.UserSeparator + password + B.HostSeparator + this.settings.PostgresHost + B.UserSeparator + B.PostgresPort + B.PathSeparator + database
-        return { [EngineSecretSet.PasswordKey]: password, [EngineSecretSet.DatabaseUrlKey]: url }
+        const password = this.Text(EngineBootstrap.PasswordBytes)
+        return { [EngineSecretSet.PasswordKey]: password, [EngineSecretSet.DatabaseUrlKey]: EnvironmentHiveDatabase.UrlFor(role, database, password) }
     }
 
     /** URL-safe random text (no escaping needed in a URL or a file). */
@@ -299,7 +382,8 @@ export class EngineBootstrap
             tenant: { id: s.TenantId, clientId: s.TenantId, displayName: s.TenantName, createdAt, ownerEmail: s.OwnerEmail, ownerPrincipalId: TenantOwner.DefaultPrincipalId },
             hives: [{
                 id: s.HiveId, tenantId: s.TenantId, displayName: s.HiveLabel,
-                cluster: { backend: HiveBackend.Private, mode: InfraMode.Attach }, registry: { mode: InfraMode.Attach },
+                // Local + attach: the hive is the cluster this console runs in (the in-cluster orchestrator takes only that backend).
+                cluster: { backend: HiveBackend.Local, mode: InfraMode.Attach }, registry: { mode: InfraMode.Attach },
                 agentTokenRef: K8sManifestBuilder.AgentTokenSecretNameOf(s.HiveId), createdAt,
             }],
         }

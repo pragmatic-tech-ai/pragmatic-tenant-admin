@@ -104,7 +104,6 @@ class BootstrapFixture
             PRAGMATIC_BOOTSTRAP_BASE_DOMAIN: 'acme.example',
             PRAGMATIC_BOOTSTRAP_IDP_HOST: 'idp-acme.acme.example',
             PRAGMATIC_BOOTSTRAP_IDP_INTERNAL_HOST: 'pragmatic-idp-acme.pragmatic-idp-acme.svc.cluster.local',
-            PRAGMATIC_BOOTSTRAP_POSTGRES_HOST: 'pragmatic-postgres.pragmatic-system.svc',
             PRAGMATIC_BOOTSTRAP_TLS_MODE: 'self-signed',
             PRAGMATIC_BOOTSTRAP_OWNER_EMAIL: 'owner@acme.example',
             ...overrides,
@@ -144,6 +143,13 @@ describe('EngineBootstrap', () =>
             assert.equal(secret.metadata.labels?.['app.kubernetes.io/managed-by'], 'pragmatic-engine', spec.Name)
         }
         assert.equal(report.Kept.length, 0)
+        for (const [namespace, component] of [['pragmatic-system', 'pragmatic-tenant-admin'], ['pragmatic-system', 'pragmatic-hive-agent'], [BootstrapFixture.IdpNamespace, 'pragmatic-tenant-idp']])
+        {
+            const map = cluster.Objects.get('/api/v1/namespaces/' + namespace + '/configmaps/pragmatic-config-' + component)
+            assert.equal(map?.metadata.labels?.['app.kubernetes.io/component'], component)
+            assert.equal(map?.metadata.labels?.['app.kubernetes.io/managed-by'], 'pragmatic-tenant-admin')
+            assert.ok(cluster.Secret(namespace, 'pragmatic-secrets-' + component), component)
+        }
         const superuser = cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.PostgresSuperuser)
         assert.equal(BootstrapFixture.Decoded(superuser, 'database-url'), 'postgres://postgres:' + BootstrapFixture.Decoded(superuser, 'password') + '@pragmatic-postgres.pragmatic-system.svc:5432/postgres')
         const idp = cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.PostgresTenantIdp)
@@ -155,6 +161,7 @@ describe('EngineBootstrap', () =>
         assert.equal(seed.tenant.id, 'acme')
         assert.equal(seed.tenant.ownerEmail, 'owner@acme.example')
         assert.equal(seed.hives[0].id, 'acme-hive')
+        assert.deepEqual(seed.hives[0].cluster, { backend: 'local', mode: 'attach' }, 'the in-cluster orchestrator takes only a local attached hive')
         assert.equal(Buffer.from(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.TenantAdminMasterKey)?.data?.['master.key'] ?? '', 'base64').length, 32)
     })
 
@@ -173,11 +180,13 @@ describe('EngineBootstrap', () =>
         const cluster = new MemoryCluster()
         await BootstrapFixture.Run(cluster)
         const before = cluster.Snapshot()
-        const report = await BootstrapFixture.Run(cluster)
+        const minter = new RecordingMinter()
+        const report = await BootstrapFixture.Run(cluster, BootstrapFixture.Env(), minter)
         assert.equal(cluster.Snapshot(), before)
         assert.deepEqual(report.Created, [])
+        assert.deepEqual(minter.Minted, [], 'nothing is minted for a kept Secret')
         const minted = EngineSecretSet.Specs(true).filter(s => s.Origin === EngineSecretOrigin.Minted && s.Name !== EngineSecretSet.DevCa)
-        assert.equal(report.Kept.length, minted.length)
+        assert.equal(report.Kept.length, minted.length + 6, 'every minted Secret and the three components\' configuration objects')
     })
 
     it('a partially present set mints only the missing ones', async () =>
@@ -190,6 +199,62 @@ describe('EngineBootstrap', () =>
         const report = await BootstrapFixture.Run(cluster)
         assert.deepEqual([...report.Created].sort(), ['pragmatic-idp-acme/' + EngineSecretSet.IdpSigningKey, 'pragmatic-system/' + EngineSecretSet.OwnerInitial].sort())
         assert.deepEqual(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.TenantAdminMasterKey), keptMaster)
+    })
+
+    it('refuses another tenant or hive over a kept engine, writing nothing', async () =>
+    {
+        const cluster = new MemoryCluster()
+        await BootstrapFixture.Run(cluster)
+        const before = cluster.Snapshot()
+        await assert.rejects(BootstrapFixture.Run(cluster, BootstrapFixture.Env({ PRAGMATIC_BOOTSTRAP_TENANT_ID: 'other', PRAGMATIC_BOOTSTRAP_IDP_NAMESPACE: 'pragmatic-idp-other' })),
+            /already holds the engine of tenant acme, hive acme-hive.*names tenant other, hive acme-hive/)
+        await assert.rejects(BootstrapFixture.Run(cluster, BootstrapFixture.Env({ PRAGMATIC_BOOTSTRAP_HIVE_ID: 'other-hive' })), /names tenant acme, hive other-hive/)
+        assert.equal(cluster.Snapshot(), before)
+    })
+
+    it('mints the console certificate and its CA again as a pair when either is missing', async () =>
+    {
+        const cluster = new MemoryCluster()
+        await BootstrapFixture.Run(cluster)
+        cluster.Objects.delete('/api/v1/namespaces/pragmatic-system/secrets/' + EngineSecretSet.DevCa)
+        const minter = new RecordingMinter()
+        const report = await BootstrapFixture.Run(cluster, BootstrapFixture.Env(), minter)
+        assert.equal(minter.Minted.length, 1)
+        assert.ok(report.Created.includes('pragmatic-system/' + EngineSecretSet.ConsoleTls))
+        assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.DevCa), 'ca.crt'), 'ca-1')
+        assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.ConsoleTls), 'tls.crt'), 'cert-1')
+        assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.IdpNamespace, EngineSecretSet.ConsoleTls), 'tls.crt'), 'cert-1', 'the copy follows')
+    })
+
+    it('a standalone engine gets no hive agent configuration objects', async () =>
+    {
+        const cluster = new MemoryCluster()
+        await BootstrapFixture.Run(cluster, BootstrapFixture.Env({ PRAGMATIC_BOOTSTRAP_LEVEL: 'standalone' }))
+        assert.equal(cluster.Objects.has('/api/v1/namespaces/pragmatic-system/configmaps/pragmatic-config-pragmatic-hive-agent'), false)
+        assert.ok(cluster.Objects.has('/api/v1/namespaces/pragmatic-system/configmaps/pragmatic-config-pragmatic-tenant-admin'))
+    })
+
+    it('the namespace step creates only the sign-in service namespace, once', async () =>
+    {
+        const cluster = new MemoryCluster()
+        const output = new RecordingOutput()
+        assert.equal(await BootstrapCli.Run(BootstrapFixture.Env(), output, cluster, new RecordingMinter(), new CountingRandom(), 'namespace'), 0)
+        assert.deepEqual([...cluster.Objects.keys()], ['/api/v1/namespaces/' + BootstrapFixture.IdpNamespace])
+        assert.ok(output.Lines.includes('created ' + BootstrapFixture.IdpNamespace))
+        const again = new RecordingOutput()
+        assert.equal(await BootstrapCli.Run(BootstrapFixture.Env(), again, cluster, new RecordingMinter(), new CountingRandom(), 'namespace'), 0)
+        assert.ok(again.Lines.includes('kept ' + BootstrapFixture.IdpNamespace))
+    })
+
+    it('never touches a configuration object the console wrote', async () =>
+    {
+        const cluster = new MemoryCluster()
+        await BootstrapFixture.Run(cluster)
+        const path = '/api/v1/namespaces/pragmatic-system/configmaps/pragmatic-config-pragmatic-tenant-admin'
+        const written = { ...cluster.Objects.get(path)!, data: { 'configuration.json': '{"options":{}}' } }
+        cluster.Objects.set(path, written)
+        await BootstrapFixture.Run(cluster)
+        assert.deepEqual(cluster.Objects.get(path), written)
     })
 
     it('copies the operator certificate for the sign-in service, and fails naming it when it is absent', async () =>

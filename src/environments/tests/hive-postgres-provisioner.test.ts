@@ -7,7 +7,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PgSession } from '@pragmatic-tech-ai/pragmatic-realm-adapters'
 import { PostgresPoolFactory } from '@pragmatic-tech-ai/pragmatic-realm-custom'
-import { HiveDatabaseOwnedError, HivePostgresProvisioner } from '../hive-postgres-provisioner.js'
+import { HiveDatabaseOwnedError, HivePostgresProvisioner, ScramVerifier, type IProvisionWait } from '../hive-postgres-provisioner.js'
+
+class NoWait implements IProvisionWait
+{
+    public Waits = 0
+
+    public async Wait(): Promise<void>
+    {
+        this.Waits++
+    }
+}
 
 /** Records every statement with its parameters; answers the owner lookup from a table. */
 class RecordingSession
@@ -124,16 +134,41 @@ describe('HivePostgresProvisioner', () =>
         await provisioner.EnsureDatabase('sales-eu', ProvisionerFixture.Password)
         assert.equal(session.Statements.filter(s => s.sql.startsWith('CREATE DATABASE')).length, 1)
         assert.ok(session.Statements.every(s => !s.sql.includes(ProvisionerFixture.Password)), 'never in a statement text')
-        assert.ok(session.Statements.some(s => s.params.includes(ProvisionerFixture.Password)))
+        assert.ok(session.Statements.every(s => !s.params.includes(ProvisionerFixture.Password)), 'never as a parameter: its SCRAM verifier is sent')
+        assert.ok(session.Statements.some(s => s.params.some(p => typeof p === 'string' && p.startsWith('SCRAM-SHA-256$4096:'))))
+        assert.ok(session.Statements.some(s => s.sql === "SET LOCAL log_parameter_max_length = 0"), 'parameter logging off for the role transaction')
         assert.ok(session.Statements.some(s => s.sql === 'REVOKE ALL ON DATABASE "env_sales_eu" FROM PUBLIC'))
         assert.ok(session.Statements.some(s => s.sql === 'GRANT CONNECT, TEMPORARY ON DATABASE "env_sales_eu" TO "env_sales_eu"'))
     })
 
-    it('a database owned by another role refuses', async () =>
+    it('the SCRAM verifier is the RFC 7677 one', () =>
     {
+        // RFC 7677 section 3: user "user", password "pencil", salt W22ZaJ0SNY7soEsUEjb6gQ== (4096 iterations).
+        assert.equal(ScramVerifier.Of('pencil', Buffer.from('W22ZaJ0SNY7soEsUEjb6gQ==', 'base64')),
+            'SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU=')
+    })
+
+    it('a failed attempt is retried; a database owned by another role refuses at once', async () =>
+    {
+        const flaky = new RecordingSession()
+        let failures = 2
+        const original = flaky.Query.bind(flaky)
+        flaky.Query = async (sql: string, params: readonly unknown[]) =>
+        {
+            if (sql.includes('pg_database') && failures-- > 0)
+            {
+                throw new Error('Connection terminated unexpectedly')
+            }
+            return await original(sql, params)
+        }
+        const wait = new NoWait()
+        await new HivePostgresProvisioner(flaky.Session, wait).Ensure('sales-eu', ProvisionerFixture.Password)
+        assert.equal(wait.Waits, 2)
         const session = new RecordingSession()
         session.Owners.set('env_sales_eu', 'someone_else')
-        await assert.rejects(new HivePostgresProvisioner(session.Session).Ensure('sales-eu', ProvisionerFixture.Password), HiveDatabaseOwnedError)
+        const refused = new NoWait()
+        await assert.rejects(new HivePostgresProvisioner(session.Session, refused).Ensure('sales-eu', ProvisionerFixture.Password), HiveDatabaseOwnedError)
+        assert.equal(refused.Waits, 0)
         assert.equal(session.Statements.filter(s => s.sql.startsWith('GRANT')).length, 0)
     })
 
@@ -190,21 +225,12 @@ describe('HivePostgresProvisioner', () =>
         } as unknown as ISqlSession
         try
         {
-            await assert.rejects(new HivePostgresProvisioner(killing).Ensure('live-two', ProvisionerFixture.Password))
-            await ProvisionerFixture.WaitReady(url)
-            const role = await ProvisionerFixture.Scalar(url, 'SELECT count(*)::int FROM pg_roles WHERE rolname = $1', ['env_live_two'])
-            assert.equal(role, 1, 'the role was created before the kill')
-            const retry = await ProvisionerFixture.Open()
-            try
-            {
-                await new HivePostgresProvisioner(retry).Ensure('live-two', ProvisionerFixture.Password)
-                assert.equal(await ProvisionerFixture.Scalar(ProvisionerFixture.RoleUrl('live-two', ProvisionerFixture.Password), 'SELECT current_database()'), 'env_live_two')
-                await new HivePostgresProvisioner(retry).Drop('live-two')
-            }
-            finally
-            {
-                await retry.Dispose()
-            }
+            // The attempt the kill breaks fails; the provisioner waits for Postgres and its retry completes the provisioning.
+            const provisioner = new HivePostgresProvisioner(killing, { Wait: () => ProvisionerFixture.WaitReady(url) })
+            await provisioner.Ensure('live-two', ProvisionerFixture.Password)
+            assert.equal(killed, true, 'Postgres was killed between the role and the database')
+            assert.equal(await ProvisionerFixture.Scalar(ProvisionerFixture.RoleUrl('live-two', ProvisionerFixture.Password), 'SELECT current_database()'), 'env_live_two')
+            await provisioner.Drop('live-two')
         }
         finally
         {

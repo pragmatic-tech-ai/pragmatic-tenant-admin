@@ -24,6 +24,8 @@ export class ConsoleBootstrapOutput implements IBootstrapOutput
 export class BootstrapCli
 {
     public static readonly Command = 'bootstrap'
+    /** `bootstrap namespace`: only the realm sign-in service's namespace (the first hook step). */
+    public static readonly NamespaceStep = 'namespace'
     private static readonly CreatedPrefix = 'created '
     private static readonly KeptPrefix = 'kept '
     private static readonly RefreshedPrefix = 'refreshed '
@@ -38,7 +40,7 @@ export class BootstrapCli
     {
     }
 
-    public static async Run(env: NodeJS.ProcessEnv, output: IBootstrapOutput, transport?: IKubeTransport, tls: ITlsMinter = new OpenSslTlsMinter(), random?: IRandomSource): Promise<number>
+    public static async Run(env: NodeJS.ProcessEnv, output: IBootstrapOutput, transport?: IKubeTransport, tls: ITlsMinter = new OpenSslTlsMinter(), random?: IRandomSource, step?: string): Promise<number>
     {
         const C = BootstrapCli
         try
@@ -50,7 +52,8 @@ export class BootstrapCli
                 output.Line(C.OutsideCluster)
                 return 1
             }
-            const report = await new EngineBootstrap(new KubeApiClient(kube), settings, tls, random).Run()
+            const bootstrap = new EngineBootstrap(new KubeApiClient(kube), settings, tls, random)
+            const report = step === C.NamespaceStep ? await bootstrap.RunNamespace() : await bootstrap.Run()
             report.Created.forEach(name => output.Line(C.CreatedPrefix + name))
             report.Kept.forEach(name => output.Line(C.KeptPrefix + name))
             report.Refreshed.forEach(name => output.Line(C.RefreshedPrefix + name))

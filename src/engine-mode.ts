@@ -19,7 +19,9 @@ export class EngineEnv
     public static readonly HivePostgresUrlFile = 'PRAGMATIC_TENANT_ADMIN_HIVE_POSTGRES_URL_FILE'
     public static readonly EnvServerImage = 'PRAGMATIC_TENANT_ADMIN_ENV_SERVER_IMAGE'
     public static readonly UiUnpackImage = 'PRAGMATIC_TENANT_ADMIN_UI_UNPACK_IMAGE'
-    /** The folder of the Owner's one-time sign-in (files `email`, `password`), seeded into the realm at start. */
+    /** The chart's `ingress.className` (empty: the cluster's default class): what every environment's Ingress names. */
+    public static readonly IngressClass = 'PRAGMATIC_TENANT_ADMIN_INGRESS_CLASS'
+    /** The folder of the Owner's initial sign-in (files `email`, `password`), seeded into the realm at start. */
     public static readonly OwnerInitialDir = 'PRAGMATIC_TENANT_ADMIN_OWNER_INITIAL_DIR'
     private static readonly UnknownModePrefix = 'PRAGMATIC_ENGINE_MODE has an unknown value: '
     private static readonly Empty = ''

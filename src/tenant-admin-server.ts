@@ -95,6 +95,10 @@ export type TenantAdminComposition = {
     readonly engine: EngineComposition
     /** The injected realm sign-in service (the Owner's seeding reaches it). */
     readonly idp: IIdpService
+    /** The console's environments (the TLS copies follow them). */
+    readonly environments: EnvironmentRegistry
+    /** The API client over the pod's service account; undefined outside a pod. */
+    readonly kube: KubeApiClient | undefined
 }
 
 /**
@@ -437,7 +441,7 @@ export class TenantAdminServer
         // and relays (the host has attached both to plane.principals above).
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
-        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer, engine, idp: idpService,
+        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer, engine, idp: idpService, environments: registry, kube: inCluster?.client,
             preparation: configuration.Preparer === undefined ? undefined : new PreparationSchedule(configuration.Preparer, log) }
     }
 
@@ -494,6 +498,7 @@ export class TenantAdminServer
         composition.preparation?.Start(tenantId)
         // A chart-installed engine seeds its realm and the Owner's one-time sign-in once the sign-in service answers.
         composition.engine.StartOwnerSeeding(composition.idp, composition.directory.Tenant, log)
+        composition.engine.StartTlsCopies(composition.kube, tenantId, cfg.ingressTls, () => composition.environments.List().map(r => r.name), log)
         await composition.advert?.Start()
         return composition
     }

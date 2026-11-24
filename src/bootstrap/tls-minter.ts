@@ -37,7 +37,12 @@ export class OpenSslTlsMinter implements ITlsMinter
     private static readonly FlagCaCreateSerial = '-CAcreateserial'
     private static readonly FlagExtfile = '-extfile'
     private static readonly TempPrefix = 'pragmatic-engine-tls-'
-    private static readonly ValidDays = '825'
+    /**
+     * Ten years: these certificates chain to a private CA the engine minted (the sign-in service's internal one, and the
+     * development CA of tls.mode=self-signed), which no browser holds to the public 398-day limit. Renewal: delete the
+     * Secret and run helm upgrade (runbooks/customer-cluster.md); production installs bring their own certificate.
+     */
+    private static readonly ValidDays = '3650'
     private static readonly KeySpec = 'rsa:2048'
     private static readonly CaSubject = '/CN=Pragmatic engine CA'
     private static readonly SubjectPrefix = '/CN='

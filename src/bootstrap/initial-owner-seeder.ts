@@ -25,7 +25,7 @@ export interface IOwnerRealm
 
 /**
  * A chart-installed engine's first local admin: the realm (named by the tenant id, from the first start, so enrolment never
- * renames it) and its Owner account with the one-time password the bootstrap minted into `pragmatic-owner-initial`
+ * renames it) and its Owner account with the initial password the bootstrap minted into `pragmatic-owner-initial`
  * (read with `kubectl get secret pragmatic-owner-initial`). The realm sign-in service keeps an existing principal's
  * password, so seeding again at every start never resets a password the Owner changed. Retried in the background until
  * the sign-in service answers; the log names steps, never the email or the password.
@@ -38,7 +38,7 @@ export class InitialOwnerSeeder
     private static readonly Utf8 = 'utf8'
     private static readonly SeededLine = '[owner] the realm and its Owner are seeded'
     private static readonly RetryPrefix = '[owner] seeding the Owner failed, retrying: '
-    private static readonly UnreadableLine = '[owner] the one-time Owner sign-in is unreadable; nothing seeded'
+    private static readonly UnreadableLine = '[owner] the Owner\'s initial sign-in is unreadable; nothing seeded'
 
     private stopped = false
 
