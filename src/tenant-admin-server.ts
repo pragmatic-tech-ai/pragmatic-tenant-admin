@@ -16,11 +16,12 @@ import { UnconfiguredRolloutClient } from './tenant-api/unconfigured-rollout-cli
 import { HttpRolloutClient } from './tenant-api/http-rollout-client.js'
 import { ConsoleConfiguration } from './configuration/console-configuration.js'
 import { TenantAdminComponent } from './tenant-admin-component.js'
-import { SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { RealmSecretWriter, RealmSecretsDirectory, SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { ConsoleStartFallback } from './configuration/console-start-fallback.js'
 import type { ConfigurationPreparer } from './configuration/configuration-preparer.js'
 import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
 import { PreparationSchedule } from './configuration/preparation-schedule.js'
+import { InterimSecretMigration, InterimSecretMigrationOutcome } from './configuration/interim-secret-migration.js'
 import { ReleaseDescriptorCatalogue } from './configuration/release-descriptor-catalogue.js'
 import { EngineComposition } from './engine-composition.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
@@ -67,6 +68,8 @@ export type TenantAdminComposition = {
     readonly preparer: ConfigurationPreparer | undefined
     /** Prepares them again while the console runs (what a target runs changes after the platform rolls it); undefined outside a pod. */
     readonly preparation: PreparationSchedule | undefined
+    /** Moves the C3.1 interim secrets into the realm secrets home at start; undefined without one, or outside a pod. */
+    readonly migration: InterimSecretMigration | undefined
     readonly directory: SeededTenantDirectory
     readonly rollout: IRolloutClient
     readonly plane: TenantPlane
@@ -396,9 +399,12 @@ export class TenantAdminServer
         const sessions = new TenantSessions(await db.SessionRepositories(), cfg.secureCookie)
         // The console configures every hive component it finds by label, through its own cluster access; at start it prepares
         // their configurations for the descriptors of the release it runs (ConfigurationPreparer).
+        // With a realm secrets home (2.5) the console writes the secrets tenant admins enter there; opening it checks the
+        // home first (the custom home's key check), so a replaced realm master key refuses the console's start.
+        const realmSecrets = RealmSecretsDirectory.Configured(env) ? await RealmSecretWriter.FromEnvironment(TenantAdminComponent.Name, env) : undefined
         const configuration = ConsoleConfiguration.Build({
             Env: env, Repository: await db.Configuration(), Environments: registry, TenantId: tenant.id,
-            HiveId: TenantAdminServer.FirstHiveOf(directory).id, Client: inCluster?.client,
+            HiveId: TenantAdminServer.FirstHiveOf(directory).id, Client: inCluster?.client, RealmSecrets: realmSecrets,
         }, log)
         const plane = TenantPlaneComposer.BuildTenantPlane({
             Idp: idpService,
@@ -442,7 +448,7 @@ export class TenantAdminServer
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
         return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer, engine, idp: idpService, environments: registry, kube: inCluster?.client,
-            preparation: configuration.Preparer === undefined ? undefined : new PreparationSchedule(configuration.Preparer, log) }
+            preparation: configuration.Preparer === undefined ? undefined : new PreparationSchedule(configuration.Preparer, log), migration: configuration.Migration }
     }
 
     /**
@@ -495,6 +501,13 @@ export class TenantAdminServer
         // their status before it rolls the components onto the release (one target failing is logged, never fatal).
         await composition.preparer?.PrepareAll(tenantId)
             .catch(err => log(TenantAdminServer.PrepareFailed + (err instanceof Error ? err.message : String(err))))
+        // Then the interim secrets move into the realm secrets home (once; each component's outcome is logged by name).
+        const moved = await composition.migration?.Run(tenantId)
+            .catch(err => TenantAdminServer.Logged(log, TenantAdminServer.MigrationFailed, err))
+        for (const report of moved ?? [])
+        {
+            if (report.Outcome !== InterimSecretMigrationOutcome.Nothing) log(TenantAdminServer.MigrationPrefix + report.Component + TenantAdminServer.MigrationSeparator + report.Outcome + TenantAdminServer.MigrationSeparator + report.Keys.join(TenantAdminServer.ListSeparator))
+        }
         composition.preparation?.Start(tenantId)
         // A chart-installed engine seeds its realm and the Owner's one-time sign-in once the sign-in service answers.
         composition.engine.StartOwnerSeeding(composition.idp, composition.directory.Tenant, log)
@@ -599,6 +612,10 @@ export class TenantAdminServer
         return undefined
     }
     private static readonly PrepareFailed = 'preparing the configurations for this release failed: '
+    private static readonly MigrationFailed = 'moving the interim secrets into the realm secrets home failed: '
+    private static readonly MigrationPrefix = 'interim secrets of '
+    private static readonly MigrationSeparator = ': '
+    private static readonly ListSeparator = ', '
 
     private static Required(env: NodeJS.ProcessEnv, name: string): string
     {

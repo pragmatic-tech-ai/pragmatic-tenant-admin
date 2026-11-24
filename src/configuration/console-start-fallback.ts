@@ -1,5 +1,5 @@
 import type { ComponentDeclaration } from '@pragmatic-tech-ai/pragmatic-component'
-import { ApplyTarget, ComponentStartConfiguration, ConfigurationStartError, type ComponentStartReport, type IStartProcess } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ApplyTarget, ComponentStartConfiguration, ConfigurationStartError, RealmSecretsDirectory, type ComponentStartReport, type IStartProcess, type SecretStoreDirectory } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { HttpsKubeTransport, InClusterServiceAccount, KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { K8sManifestBuilder, TenantAdminEnv } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../tenant-admin-component.js'
@@ -34,10 +34,23 @@ export class ConsoleStartFallback
     public static async Start<T>(declaration: ComponentDeclaration, env: NodeJS.ProcessEnv, read: (env: NodeJS.ProcessEnv) => T, revert: IConsoleRevert | undefined = ConsoleStartFallback.InCluster(env), process: IStartProcess = globalThis.process as unknown as IStartProcess): Promise<T>
     {
         const F = ConsoleStartFallback
+        // `file` and, with a realm secrets home (2.5), `realm`. A home that fails its check (a replaced realm master key, no
+        // projected token) refuses the start, but puts nothing back: the configuration is not what failed.
+        let stores: SecretStoreDirectory
+        try
+        {
+            stores = await RealmSecretsDirectory.Stores(declaration.name, env)
+        }
+        catch (error)
+        {
+            if (!(error instanceof ConfigurationStartError)) throw error
+            process.stderr.write(declaration.name + F.ReasonSeparator + error.message + F.LineEnd)
+            return process.exit(ComponentStartConfiguration.ExitCode)
+        }
         try
         {
             // The console alone re-validates a configuration of its previous descriptor (it prepares everyone's entries, so nobody prepares its own).
-            const report = await ComponentStartConfiguration.Apply({ Declaration: declaration, Env: env, Revalidate: true })
+            const report = await ComponentStartConfiguration.Apply({ Declaration: declaration, Env: env, Revalidate: true, Stores: stores })
             F.Tell(declaration, report, process)
             return read(env)
         }

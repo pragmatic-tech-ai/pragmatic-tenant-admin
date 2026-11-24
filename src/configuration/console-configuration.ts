@@ -1,9 +1,11 @@
-import { ApplyTarget, SettingValueEncoding, type IConfigurationRepository } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ApplyTarget, SettingValueEncoding, type IConfigurationRepository, type RealmSecretWriter } from '@pragmatic-tech-ai/pragmatic-configuration'
 import type { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { OciRegistryClient, ReleaseApp, ReleaseComponentDescriptors, ReleaseRegistry, ReleaseTrustKeys } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import { ConfigurationService, K8sManifestBuilder, UnavailableComponentSecretWriter, UnavailableConfigurationApplier, type ConfigurationTarget, type EnvironmentRecord, type IConfigurationTargetSource } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../tenant-admin-component.js'
 import { ComponentSecretWriter } from './component-secret-writer.js'
+import { InterimSecretMigration } from './interim-secret-migration.js'
+import { RealmComponentSecretWriter } from './realm-component-secret-writer.js'
 import { ImageComponentDigests } from './image-component-digests.js'
 import { KubeConfigurationApplier } from './kube-configuration-applier.js'
 import { LabelConfigurationTargets, type IConfiguredNamespaces } from './label-configuration-targets.js'
@@ -98,7 +100,12 @@ export class NoConfigurationTargets implements IConfigurationTargetSource
  *  until the console its own apply started is proven. */
 export class ComposedConsoleConfiguration
 {
-    public constructor(public readonly Service: ConfigurationService, public readonly Preparer: ConfigurationPreparer | undefined, public readonly Self: ConsoleSelfApply | undefined = undefined)
+    public constructor(
+        public readonly Service: ConfigurationService,
+        public readonly Preparer: ConfigurationPreparer | undefined,
+        public readonly Self: ConsoleSelfApply | undefined = undefined,
+        /** With a realm secrets home, inside a cluster: the move of the C3.1 interim secrets into it, run at start. */
+        public readonly Migration: InterimSecretMigration | undefined = undefined)
     {
         Object.freeze(this)
     }
@@ -114,12 +121,16 @@ export interface ConsoleConfigurationParts
     HiveId: string
     /** The console's Kubernetes access; undefined outside a cluster (nothing can be applied). */
     Client: KubeApiClient | undefined
+    /** The realm secrets home's writer when the hive has one (2.5): secrets a tenant admin enters go there, and the
+     *  interim Kubernetes Secrets move there at start. Undefined: the interim `file` store, as before. */
+    RealmSecrets?: RealmSecretWriter
 }
 
 /**
  * The tenant admin console's configuration repository, composed: descriptors from the signed platform release (the
  * mounted set of the release it runs, then the adopted releases from the registry when release keys are mounted),
- * targets by label, watched applies with revert, and component secrets in the customer's own cluster.
+ * targets by label, watched applies with revert, and component secrets in the realm's secrets home (2.5), or, in a hive
+ * without one, in the customer's own cluster (the C3.1 interim `file` store).
  */
 export class ConsoleConfiguration
 {
@@ -157,7 +168,10 @@ export class ConsoleConfiguration
         const preparer = new ConfigurationPreparer(parts.Client, parts.Repository, catalogue, targets, lock, log)
         const self = C.SelfOf(parts.Client, parts.TenantId, parts.HiveId)
         const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, self, lock, preparer)
-        return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, targets, applier, new ComponentSecretWriter(parts.Client), preparer), preparer, self)
+        const secrets = parts.RealmSecrets === undefined ? new ComponentSecretWriter(parts.Client) : new RealmComponentSecretWriter(parts.RealmSecrets)
+        const service = new ConfigurationService(parts.Repository, catalogue, targets, applier, secrets, preparer)
+        const migration = parts.RealmSecrets === undefined ? undefined : new InterimSecretMigration(service, parts.Client, parts.RealmSecrets)
+        return new ComposedConsoleConfiguration(service, preparer, self, migration)
     }
 
     /** The console's own Deployment, as its configuration target. */
