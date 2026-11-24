@@ -9,14 +9,15 @@ export interface IRealmHomeWorkloads
     Gives(component: string, target: ApplyTarget): Promise<boolean>
 }
 
-type ContainerShape = { name?: unknown; env?: Array<{ name?: unknown }> }
+type ContainerShape = { name?: unknown; env?: Array<{ name?: unknown; value?: unknown }> }
 type DeploymentShape = {
     metadata?: { labels?: Record<string, unknown> }
     spec?: { template?: { spec?: { containers?: ContainerShape[]; initContainers?: ContainerShape[] } } }
 }
 
 /**
- * Reads the target's Deployment: its component's container must carry `PRAGMATIC_REALM_SECRETS_OPTION`. A version that
+ * Reads the target's Deployment: its component's container must carry `PRAGMATIC_REALM_SECRETS_OPTION` with the console's
+ * own option. A version that
  * reads the realm home (RealmCapableComponents) is not enough: an environment's Deployment rendered before its console had
  * the home, then rolled to a newer server image, runs a capable version without the home's settings, and a configuration
  * holding `secret:realm/...` would refuse its start. A missing Deployment is not given; one that cannot be read (the API
@@ -30,7 +31,8 @@ export class KubeRealmHomeWorkloads implements IRealmHomeWorkloads
     private static readonly Separator = '/'
     private static readonly UnknownError = 'Error'
 
-    public constructor(private readonly client: KubeApiClient, private readonly log: (line: string) => void)
+    /** `option`: the console's own realm secrets option; a workload given another one (not yet brought up after a switch) is not given this home. */
+    public constructor(private readonly client: KubeApiClient, private readonly log: (line: string) => void, private readonly option: string | undefined)
     {
     }
 
@@ -51,7 +53,7 @@ export class KubeRealmHomeWorkloads implements IRealmHomeWorkloads
         const wanted = ComponentConfigurationMounts.ContainerOf(deployment?.metadata?.labels, component)
         const pod = deployment?.spec?.template?.spec
         const container = [...(pod?.containers ?? []), ...(pod?.initContainers ?? [])].find(c => c.name === wanted)
-        return (container?.env ?? []).some(variable => variable.name === RealmSecretsSettings.OptionVariable)
+        return (container?.env ?? []).some(variable => variable.name === RealmSecretsSettings.OptionVariable && variable.value === this.option)
     }
 }
 

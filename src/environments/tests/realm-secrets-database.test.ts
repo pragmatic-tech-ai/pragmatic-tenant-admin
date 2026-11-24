@@ -159,10 +159,13 @@ describe('RealmSecretsDatabase', () =>
     {
         const superuser = new RecordingSession()
         const opened: string[] = []
+        const sessions: RecordingSession[] = []
         const open = async () =>
         {
             opened.push('realm_secrets')
-            return new RecordingSession() as unknown as ISqlSession
+            const session = new RecordingSession()
+            sessions.push(session)
+            return session as unknown as ISqlSession
         }
         const database = new RealmSecretsDatabase(superuser as unknown as ISqlSession, new NoWait())
         await database.Ensure(RealmFixture.Roles, 'acme', open)
@@ -174,6 +177,7 @@ describe('RealmSecretsDatabase', () =>
         assert.ok(superuser.Statements.some(s => s.params.some(p => typeof p === 'string' && p.startsWith('SCRAM-SHA-256$4096:'))))
         assert.deepEqual(opened, ['realm_secrets', 'realm_secrets'])
         assert.equal(superuser.Statements.some(s => s.sql === 'REVOKE ALL ON DATABASE "realm_secrets" FROM PUBLIC'), true)
+        assert.equal(sessions[0]!.Statements[0]!.sql, 'REVOKE CREATE ON SCHEMA public FROM PUBLIC', 'in the home, before its schema is made')
     })
 
     it('a Postgres still starting is retried', async () =>

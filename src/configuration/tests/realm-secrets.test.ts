@@ -283,10 +283,12 @@ describe('secrets in the realm secrets home', () =>
         await scene.AppliedWithFileToken()
         scene.Workload('pragmatic-env-dev1', Scene.Server, true)
         scene.Workload('pragmatic-env-dev2', Scene.Server, false)
-        const workloads = new KubeRealmHomeWorkloads(new KubeApiClient(scene.Cluster), () => undefined)
+        const workloads = new KubeRealmHomeWorkloads(new KubeApiClient(scene.Cluster), () => undefined, 'custom')
         assert.equal(await workloads.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)), true)
         assert.equal(await workloads.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev2', Scene.Server)), false, 'rendered before the console had the home, then rolled')
         assert.equal(await workloads.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-gone', Scene.Server)), false, 'no Deployment')
+        const switched = new KubeRealmHomeWorkloads(new KubeApiClient(scene.Cluster), () => undefined, 'gcp')
+        assert.equal(await switched.Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)), false, 'given another option (not brought up since a switch): not this home')
         scene.Interim('pragmatic-env-dev1', { token: 'v' })
         scene.Interim('pragmatic-env-dev2', { token: 'v' })
         assert.equal((await scene.Migration(undefined, workloads).Run(Scene.Tenant)).find(report => report.Component === Scene.Server)!.Outcome, InterimSecretMigrationOutcome.AwaitingUpgrade)
@@ -301,7 +303,7 @@ describe('secrets in the realm secrets home', () =>
     {
         const lines: string[] = []
         const failing = new KubeApiClient({ Send: async () => { throw new TypeError('fetch failed') } } as never)
-        assert.equal(await new KubeRealmHomeWorkloads(failing, line => lines.push(line)).Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)), false)
+        assert.equal(await new KubeRealmHomeWorkloads(failing, line => lines.push(line), 'custom').Gives(Scene.Server, new ApplyTarget('h1', 'pragmatic-env-dev1', Scene.Server)), false)
         assert.deepEqual(lines, ['realm secrets: the workload of a target could not be read, so it keeps its interim secrets: pragmatic-env-dev1/pragmatic-env-server/TypeError'])
     })
 

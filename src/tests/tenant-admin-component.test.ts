@@ -10,7 +10,7 @@ class TenantAdminComponentFixture
 {
     public static readonly Here = dirname(fileURLToPath(import.meta.url))
     public static readonly Golden = join(TenantAdminComponentFixture.Here, 'fixtures', 'pragmatic-tenant-admin.component.json')
-    public static readonly Digest = 'sha256:8c5529358bf3d4e70167c7638ba991172280f8593a9886d507eb4e0ed34ec3ff'
+    public static readonly Digest = 'sha256:71df3b1765405f841408d9ed4a0d7f9284850f8e48f0165511cb325485636fa1'
     public static readonly Readers = [
         ComponentSources.InPackage('@pragmatic-tech-ai/pragmatic-tenant-plane', 'tenant-admin-env.js'),
         join(TenantAdminComponentFixture.Here, '..', 'configuration', 'console-configuration.ts'),
