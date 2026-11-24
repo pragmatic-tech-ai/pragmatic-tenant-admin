@@ -64,6 +64,7 @@ RUN groupadd --system --gid 10001 pragmatic && useradd --system --create-home --
 WORKDIR /workspace/pragmatic-tenant-admin
 
 FROM runtime AS pragmatic-tenant-admin
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace/pragmatic-tenant-admin/package.json /workspace/pragmatic-tenant-admin/package.json
 COPY --from=build /workspace/pragmatic-tenant-admin/node_modules /workspace/pragmatic-tenant-admin/node_modules
 COPY --from=build /workspace/pragmatic-tenant-admin/dist /workspace/pragmatic-tenant-admin/dist

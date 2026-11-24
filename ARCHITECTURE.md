@@ -6,7 +6,11 @@ The console's composition and its in-hive seams live here; the tenant plane it c
 
 | File | Role |
 |---|---|
-| `src/bin/pragmatic-tenant-admind.ts` | The entry: `TenantAdminServer.Main()`. |
+| `src/bin/pragmatic-tenant-admind.ts` | The entry: `TenantAdminCommand.Run(argv)` (`src/tenant-admin-command.ts`): no argument serves the console, `bootstrap` runs the engine chart's bootstrap hook. |
+| `src/engine-mode.ts`, `src/engine-composition.ts` | `EngineMode` (`connected`, `standalone`) and `EngineEnv`, the engine chart's settings (C3.2; a pushed console sets none); `EngineComposition`: the release images and the hive Postgres environments run on, the Owner's seeding. |
+| `src/tenant-api/engine-rollout-client.ts` | `EngineRolloutClient`: no agent channel. Standalone: the rollout routes answer 404 (`engine-standalone`); connected before enrolment: 503 (`hive-not-enrolled`). No agent-channel client is built. |
+| `src/bootstrap/` | The engine chart's bootstrap hook: `EngineSecretSet` (names and keys of every engine Secret, all `helm.sh/resource-policy: keep`), `EngineBootstrap` (creates the realm sign-in service's namespace, mints each absent Secret in the cluster, never replaces one, refreshes the copies), `OpenSslTlsMinter` (name-constrained CA + server certificate), `BootstrapCli` (names only, never values), `InitialOwnerSeeder` (the realm and its Owner from `pragmatic-owner-initial`, retried until the sign-in service answers). |
+| `src/environments/hive-postgres-provisioner.ts` | `HivePostgresProvisioner`: an environment's role and database `env_<name>` on the hive's one Postgres, idempotent, the password only as a bind parameter; `Drop` on deletion. |
 | `src/bin/pragmatic-tenant-admin-import.ts` | `TenantAdminImportBin`: imports a pre-A5 data root into the console database (`--force` to repeat). |
 | `src/tenant-admin-server.ts` | `TenantAdminServer`: reads the environment, opens the database, composes the tenant plane (delivery, stores, services, host, health monitor, advert sender) and serves it with the tenant portal. |
 | `src/tenant-admin-database.ts` | `TenantAdminDatabase`, `TenantAdminRegistry`: the console's own Postgres, one `records_<name>` table per registry. |
@@ -39,6 +43,8 @@ Tests:
   `res-recorder.ts`, `tenant-test-sessions.ts`, also copied into pragmatic-tenant-plane's tests).
 - `tests/*.test.ts` (`npm test`): the release module's descriptor equals the pinned digest, one installed copy of TODL, todl-runtime and Mural, and the entry's closure carries none of the dev-box
   drivers.
+- `tests/live/hive-postgres.sh` (hive-laptop WSL, `hive.cmd run --wsl <clone> -- bash tests/live/hive-postgres.sh`): the live
+  provisioner tests (a throwaway pragmatic-postgres; the kill-between-role-and-database retry) and the openssl minter.
 - `tests/image.test.sh <image>` (CI, after the bake): the runtime files are in the image and the entry stops on missing
   configuration, never on a missing module.
 - `tenant-portal/src/**/tests` (`npm test` in `tenant-portal`): the portal's view models and services;

@@ -36,6 +36,36 @@ resources ConnectionResources {
 
             ScrollViewer [ HorizontalScrollEnabled = false, Visibility = $IsPopulated << ToVisibility ] {
                 StackPanel [ Orientation = Vertical ] {
+                    // A standalone engine: no channel, nothing to connect.
+                    StackPanel [ Orientation = Vertical, Visibility = $IsStandalone << ToVisibility ] {
+                        TextBlock [ Text = "Home channel", Style = @TenantSectionCaption ]
+                        Border [ Style = @TenantPanel ] {
+                            StackPanel [ Orientation = Vertical ] {
+                                TextBlock [ Text = $Headline, Foreground = @Fg0, TextWrapping = Wrap ]
+                                TextBlock [ Text = "This hive was installed standalone: nothing in it dials out to Pragmatic, and Pragmatic cannot reach it. Upgrade it with helm upgrade and the release you choose.",
+                                            Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,8,0,0) ]
+                            }
+                        }
+                    }
+
+                    // A connected engine before enrolment: how to connect it.
+                    StackPanel [ Orientation = Vertical, Visibility = $IsNotEnrolled << ToVisibility ] {
+                        TextBlock [ Text = "Connect this hive", Style = @TenantSectionCaption ]
+                        Border [ Style = @TenantPanel ] {
+                            StackPanel [ Orientation = Vertical ] {
+                                StackPanel [ Orientation = Horizontal ] {
+                                    Border [ Fill = @StateWarningSoft, Padding = (8,2,8,2), Margin = (0,0,8,0) ] {
+                                        TextBlock [ Text = $StatusLabel, Style = @UiCaption, Foreground = @StateWarningInk ]
+                                    }
+                                    TextBlock [ Text = $Headline, Foreground = @Fg0, VerticalAlignment = Center ]
+                                }
+                                TextBlock [ Text = "Connect this hive to receive releases and let Pragmatic place your environments. In your Pragmatic account, open Hives, choose Connect a hive and use its one-time enrolment code with this hive's agent. Until then your environments run here on their own.",
+                                            Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,8,0,0) ]
+                            }
+                        }
+                    }
+
+                    StackPanel [ Orientation = Vertical, Visibility = $HasChannel << ToVisibility ] {
                     // Home channel: the status and what it means.
                     TextBlock [ Text = "Home channel", Style = @TenantSectionCaption ]
                     Border [ Style = @TenantPanel ] {
@@ -99,6 +129,7 @@ resources ConnectionResources {
                                           ItemTemplate = @ConnectionEnvironmentRowTemplate ]
                             }
                         }
+                    }
                     }
                 }
             }

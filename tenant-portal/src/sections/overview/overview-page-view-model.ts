@@ -5,6 +5,7 @@ import { EnvironmentRow } from '../../environment-row.js'
 import { ApiError } from '../../tenant-api-client.js'
 import type { EnvironmentDto, HiveHealthDto, HiveRolloutDto, ManifestDto } from '../../tenant-types.js'
 import { AdminCapability } from '../../shell/admin-capability.js'
+import { EngineConnection } from '../../shell/engine-connection.js'
 import { ShownPage, type IShownPage } from '../../shell/shown-page.js'
 import { TenantPageViewModel } from '../../shell/tenant-page-view-model.js'
 import type { TenantSessionService } from '../../shell/tenant-session-service.js'
@@ -23,6 +24,10 @@ export enum OverviewConnectionState
     NoHive,
     Forbidden,
     Unavailable,
+    // A standalone engine: it never contacts Pragmatic.
+    Standalone,
+    // A connected engine before enrolment.
+    NotEnrolled,
 }
 
 // What the Overview reads about the hive: its connection, environment
@@ -78,6 +83,14 @@ export class OverviewHiveSnapshot
     private static ConnectionOf(e: unknown): OverviewConnectionState
     {
         BestEffort.RethrowUnauthorized(e)
+        if (EngineConnection.IsStandalone(e))
+        {
+            return OverviewConnectionState.Standalone
+        }
+        if (EngineConnection.IsNotEnrolled(e))
+        {
+            return OverviewConnectionState.NotEnrolled
+        }
         if (e instanceof ApiError && e.Status === ApiError.UnavailableStatus)
         {
             return OverviewConnectionState.Quiet
@@ -174,6 +187,8 @@ export class OverviewPageViewModel extends TenantPageViewModel implements IShown
     private static readonly NoHiveText = 'No hive yet. Your connection status appears once your hive is installed.'
     private static readonly ForbiddenText = 'Connection status is not available to you.'
     private static readonly UnavailableText = 'Could not load the connection status.'
+    private static readonly StandaloneText = 'This hive runs standalone: it never contacts Pragmatic.'
+    private static readonly NotEnrolledText = 'This hive is not connected to Pragmatic yet. Connection status shows how to connect it.'
     private static readonly DerivedProperties: readonly string[] = [
         'Subtitle', 'HasEnvironments', 'HasNoEnvironments', 'HasOffer', 'OfferTitle', 'OfferBody', 'ConnectionLabel', 'ConnectionText', 'IsConnected', 'IsQuiet', 'HasConnectionPill',
     ]
@@ -338,6 +353,10 @@ export class OverviewPageViewModel extends TenantPageViewModel implements IShown
                 return O.NoHiveText
             case OverviewConnectionState.Forbidden:
                 return O.ForbiddenText
+            case OverviewConnectionState.Standalone:
+                return O.StandaloneText
+            case OverviewConnectionState.NotEnrolled:
+                return O.NotEnrolledText
             default:
                 return O.UnavailableText
         }

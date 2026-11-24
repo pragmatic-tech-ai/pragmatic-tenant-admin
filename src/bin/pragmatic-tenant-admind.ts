@@ -1,3 +1,3 @@
-import { TenantAdminServer } from '../tenant-admin-server.js'
+import { TenantAdminCommand } from '../tenant-admin-command.js'
 
-await TenantAdminServer.Main()
+await TenantAdminCommand.Run(process.argv.slice(2))

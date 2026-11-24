@@ -111,6 +111,23 @@ describe('Overview page', () =>
         assert.equal(forbiddenPage.HasConnectionPill, false)
     })
 
+    it('reads a standalone engine and an unenrolled hive by their codes, with no connection pill', async () =>
+    {
+        const standalone = Home.Api()
+        standalone.FailOn.set('GetRollout', new ApiError(404, 'standalone', 'engine-standalone'))
+        const standalonePage = await Home.Open(new SectionsFixture(standalone))
+        assert.equal(standalonePage.Connection, OverviewConnectionState.Standalone)
+        assert.equal(standalonePage.HasConnectionPill, false)
+        assert.match(standalonePage.ConnectionText, /runs standalone/)
+
+        const unenrolled = Home.Api()
+        unenrolled.FailOn.set('GetRollout', new ApiError(503, 'not connected', 'hive-not-enrolled'))
+        const unenrolledPage = await Home.Open(new SectionsFixture(unenrolled))
+        assert.equal(unenrolledPage.Connection, OverviewConnectionState.NotEnrolled)
+        assert.equal(unenrolledPage.IsQuiet, false)
+        assert.match(unenrolledPage.ConnectionText, /not connected to Pragmatic yet/)
+    })
+
     it('still shows the environments without a hive, omitting what needs one', async () =>
     {
         const api = new FakeTenantApi().WithEnvironment('alpha')

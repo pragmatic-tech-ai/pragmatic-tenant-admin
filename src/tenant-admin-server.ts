@@ -22,6 +22,9 @@ import type { ConfigurationPreparer } from './configuration/configuration-prepar
 import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
 import { PreparationSchedule } from './configuration/preparation-schedule.js'
 import { ReleaseDescriptorCatalogue } from './configuration/release-descriptor-catalogue.js'
+import { EngineComposition } from './engine-composition.js'
+import { EngineEnv, EngineMode } from './engine-mode.js'
+import { EngineRolloutClient } from './tenant-api/engine-rollout-client.js'
 
 export type TenantAdminConfig = {
     readonly dataRoot: string
@@ -88,6 +91,10 @@ export type TenantAdminComposition = {
     readonly registration: ConsoleRegistration
     /** The console's own Postgres database; closed with the console. */
     readonly database: TenantAdminDatabase
+    /** What a chart-installed engine adds (its mode, the hive Postgres, the Owner's seeding); empty for a pushed console. */
+    readonly engine: EngineComposition
+    /** The injected realm sign-in service (the Owner's seeding reaches it). */
+    readonly idp: IIdpService
 }
 
 /**
@@ -116,6 +123,7 @@ export class TenantAdminServer
     private static readonly NotSetSuffix = ' is not set'
     private static readonly BadKeyInfix = ' does not name a readable key file of '
     private static readonly BytesSuffix = ' bytes'
+    private static readonly StandaloneReason = 'a standalone engine never contacts Pragmatic'
 
     private running: TenantAdminComposition | undefined
     /** The watch that proves (or puts back) the console's own apply this process was started by; ends at Close. */
@@ -138,13 +146,22 @@ export class TenantAdminServer
         await new TenantAdminServer(config, TenantAdminServer.RolloutClientFrom(process.env)).Run()
     }
 
-    /** The HTTP rollout client when the agent-channel URL is configured (token + hive id then required); otherwise the default. */
+    /**
+     * The HTTP rollout client when the agent-channel URL is configured (token + hive id then required); otherwise the default.
+     * A standalone engine builds no agent-channel client at all (its routes answer 404), and a connected engine without the
+     * URL is not enrolled yet (its routes answer 503 naming that).
+     */
     public static RolloutClientFrom(env: NodeJS.ProcessEnv): IRolloutClient
     {
+        const mode = EngineEnv.ModeOf(env)
+        if (mode === EngineMode.Standalone)
+        {
+            return EngineRolloutClient.Standalone()
+        }
         const url = env[TenantAdminEnv.RolloutUrl]
         if (url === undefined || url === TenantAdminServer.EmptyString)
         {
-            return TenantAdminServer.DefaultRolloutClient()
+            return mode === EngineMode.Connected ? EngineRolloutClient.NotEnrolled() : TenantAdminServer.DefaultRolloutClient()
         }
         return new HttpRolloutClient(
             url,
@@ -201,6 +218,10 @@ export class TenantAdminServer
     private static AdvertSettingsOf(env: NodeJS.ProcessEnv, cfg: TenantAdminConfig, log: (line: string) => void): AdvertSettings | undefined
     {
         const S = TenantAdminServer
+        if (EngineEnv.ModeOf(env) === EngineMode.Standalone)
+        {
+            return S.AdvertOff(log, S.StandaloneReason)
+        }
         const url = S.OptionalOf(env, TenantAdminEnv.RolloutUrl)
         const token = SecretVariable.Read(env, TenantAdminEnv.RolloutToken)
         const hiveId = S.OptionalOf(env, TenantAdminEnv.RolloutHiveId)
@@ -315,13 +336,15 @@ export class TenantAdminServer
         }
         const masterKey = MasterKeyFile.Load(keyPath)
         const db = database ?? await TenantAdminDatabase.Open(env)
+        const engine = EngineComposition.From(env)
         try
         {
             await TenantAdminImport.ImportIfPending(dataRoot, db, log)
-            return await this.ComposeOver(db, masterKey, env, serviceAccountRoot, log)
+            return await this.ComposeOver(db, masterKey, env, serviceAccountRoot, log, engine)
         }
         catch (err)
         {
+            await engine.Close()
             if (database === undefined)
             {
                 await db.Close()
@@ -330,7 +353,7 @@ export class TenantAdminServer
         }
     }
 
-    private async ComposeOver(db: TenantAdminDatabase, masterKey: Buffer, env: NodeJS.ProcessEnv, serviceAccountRoot: string | undefined, log: (line: string) => void): Promise<TenantAdminComposition>
+    private async ComposeOver(db: TenantAdminDatabase, masterKey: Buffer, env: NodeJS.ProcessEnv, serviceAccountRoot: string | undefined, log: (line: string) => void, engine: EngineComposition): Promise<TenantAdminComposition>
     {
         const cfg = this.config
         const dataRoot = cfg.dataRoot
@@ -347,12 +370,14 @@ export class TenantAdminServer
         const account = InClusterServiceAccount.Detect(env, serviceAccountRoot)
         const inCluster = account === undefined ? undefined : TenantAdminServer.InClusterOrchestrationOf(account, directory, verifier)
         const orchestrators = inCluster === undefined ? new HiveOrchestratorFactory() : new HiveOrchestratorFactory(undefined, dataRoot, inCluster)
-        const placement = new EnvironmentPlacement(directory, cfg.ingressTls)
+        // A chart-installed engine runs environments on the release's images and the hive's one Postgres.
+        const placement = new EnvironmentPlacement(directory, cfg.ingressTls, undefined, engine.Environment)
+        const databases = await engine.OpenProvisioner()
         const reach = inCluster === undefined ? undefined : new InClusterEnvironmentReach(orchestrators.For(TenantAdminServer.FirstHiveOf(directory)).Kubectl)
         // No PlatformImageSigner here, deliberately: the platform signing key's private half never ships into a hive, so
         // the in-hive tenant admin cannot sign. It runs only images the platform signed (its hive's verification decides).
         const proxy = new AdminProxy(new WsAdminConnector())
-        const service = new EnvironmentService(registry, new PortAllocator(TenantPlaneComposer.EnvPortFloor, new NetPortProbe()), new EnvironmentRuntimeResolver(noHost, new InClusterEnvironmentRuntime(orchestrators, placement, directory, new BundleBuilderAdapter()), directory, orchestrators), new UserSeederAdapter(new UserSeeder()), dataRoot, proxy, directory, idpService, conn => new IdpAdminClient(conn), undefined, reach)
+        const service = new EnvironmentService(registry, new PortAllocator(TenantPlaneComposer.EnvPortFloor, new NetPortProbe()), new EnvironmentRuntimeResolver(noHost, new InClusterEnvironmentRuntime(orchestrators, placement, directory, new BundleBuilderAdapter(), undefined, databases), directory, orchestrators), new UserSeederAdapter(new UserSeeder()), dataRoot, proxy, directory, idpService, conn => new IdpAdminClient(conn), undefined, reach)
         const tenant = directory.Tenant
         const emailDomains = await ConsoleEmailDomainStore.Open(await db.Map(R.EmailDomains), tenant.id, tenant.emailDomains)
         const desktopAudit = new AuditRegistry(await db.Map(R.DesktopAudit))
@@ -412,7 +437,7 @@ export class TenantAdminServer
         // and relays (the host has attached both to plane.principals above).
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
-        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer,
+        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer, engine, idp: idpService,
             preparation: configuration.Preparer === undefined ? undefined : new PreparationSchedule(configuration.Preparer, log) }
     }
 
@@ -445,6 +470,7 @@ export class TenantAdminServer
                 await self.AbandonOnce(repository, tenantId, awaiting)
                     .catch(failed => log(TenantAdminServer.SettleFailed + (failed instanceof Error ? failed.message : String(failed))))
             }
+            await composition.engine.Close()
             if (database === undefined)
             {
                 await composition.database.Close()
@@ -466,6 +492,8 @@ export class TenantAdminServer
         await composition.preparer?.PrepareAll(tenantId)
             .catch(err => log(TenantAdminServer.PrepareFailed + (err instanceof Error ? err.message : String(err))))
         composition.preparation?.Start(tenantId)
+        // A chart-installed engine seeds its realm and the Owner's one-time sign-in once the sign-in service answers.
+        composition.engine.StartOwnerSeeding(composition.idp, composition.directory.Tenant, log)
         await composition.advert?.Start()
         return composition
     }
@@ -496,6 +524,7 @@ export class TenantAdminServer
         }
         finally
         {
+            await composition.engine.Close()
             if (this.ownsDatabase)
             {
                 await composition.database.Close()

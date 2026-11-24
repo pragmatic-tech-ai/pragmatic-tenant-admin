@@ -809,6 +809,15 @@ describe('TenantAdminServer console advert', () =>
         assert.deepEqual(lines, [])
     })
 
+    it('a standalone engine builds no advert sender even with every setting present', async () =>
+    {
+        const lines: string[] = []
+        const env = { ...advertEnv(), PRAGMATIC_ENGINE_MODE: 'standalone' }
+        assert.equal(TenantAdminServer.AdvertSenderOf(env, TenantAdminServer.ReadConfig(env), tenant, await store(), line => lines.push(line)), undefined)
+        assert.equal(lines.length, 1)
+        assert.match(lines[0], /standalone engine never contacts Pragmatic/)
+    })
+
     for (const missing of [TenantAdminEnv.ConsoleHost, TenantAdminEnv.FingerprintKeyFile, TenantAdminEnv.RolloutUrl, TenantAdminEnv.RolloutToken, TenantAdminEnv.RolloutHiveId])
     {
         it(`AdvertSenderOf needs the console host, the fingerprint key and the agent channel (${missing})`, async () =>

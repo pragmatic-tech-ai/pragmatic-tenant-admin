@@ -2,6 +2,7 @@ import { ObservableCollection } from '@pragmatic-tech-ai/mural/runtime'
 import { Observable } from '@pragmatic-tech-ai/todl-runtime'
 import { ApiError } from '../../tenant-api-client.js'
 import type { HiveRolloutDto, RolloutEnvDto } from '../../tenant-types.js'
+import { EngineConnection } from '../../shell/engine-connection.js'
 import { TenantPageViewModel } from '../../shell/tenant-page-view-model.js'
 import type { TenantSessionService } from '../../shell/tenant-session-service.js'
 
@@ -33,13 +34,32 @@ export class ConnectionEnvironmentRowViewModel extends Observable
     }
 }
 
+// How the hive's engine is linked to Pragmatic: through its agent channel
+// (connected or quiet), not yet (a connected engine before enrolment: the
+// page offers "Connect this hive"), or never (a standalone engine).
+export enum ConnectionKind
+{
+    Channel,
+    NotEnrolled,
+    Standalone,
+}
+
 // Connection status: how the hive reaches Pragmatic. Read-only. The hive is
 // the tenant's one hive; no hive is the Empty state. The rollout probe
 // answering 503 means the link is quiet right now: that is a state of the
 // connection (Populated, Quiet), not a failure of the page. 403 is Denied.
+// A chart-installed engine without a channel is Populated too: standalone
+// (404, code engine-standalone) or not enrolled yet (503, hive-not-enrolled).
 export class ConnectionPageViewModel extends TenantPageViewModel
 {
     private static readonly IsQuietProperty = 'IsQuiet'
+    private static readonly HasChannelProperty = 'HasChannel'
+    private static readonly IsStandaloneProperty = 'IsStandalone'
+    private static readonly IsNotEnrolledProperty = 'IsNotEnrolled'
+    private static readonly StandaloneLabel = 'Standalone'
+    private static readonly NotEnrolledLabel = 'Not connected'
+    private static readonly StandaloneHeadline = 'This hive runs standalone: it never contacts Pragmatic.'
+    private static readonly NotEnrolledHeadline = 'This hive is not connected to Pragmatic yet.'
     private static readonly IsConnectedProperty = 'IsConnected'
     private static readonly StatusLabelProperty = 'StatusLabel'
     private static readonly HeadlineProperty = 'Headline'
@@ -60,6 +80,7 @@ export class ConnectionPageViewModel extends TenantPageViewModel
     private static readonly QuietNoEnvironments = 'Running versions are unavailable while the link is quiet.'
 
     private quiet = false
+    private kind = ConnectionKind.Channel
     private rollout: HiveRolloutDto | undefined
     private rows = new ObservableCollection<ConnectionEnvironmentRowViewModel>()
 
@@ -68,24 +89,64 @@ export class ConnectionPageViewModel extends TenantPageViewModel
         super(session)
     }
 
+    public get Kind(): ConnectionKind
+    {
+        return this.kind
+    }
+
+    // Whether the hive has an agent channel at all (connected or quiet).
+    public get HasChannel(): boolean
+    {
+        return this.kind === ConnectionKind.Channel
+    }
+
+    public get IsStandalone(): boolean
+    {
+        return this.kind === ConnectionKind.Standalone
+    }
+
+    // A connected engine before enrolment: the page offers "Connect this hive".
+    public get IsNotEnrolled(): boolean
+    {
+        return this.kind === ConnectionKind.NotEnrolled
+    }
+
     public get IsQuiet(): boolean
     {
-        return this.quiet
+        return this.HasChannel && this.quiet
     }
 
     public get IsConnected(): boolean
     {
-        return !this.quiet
+        return this.HasChannel && !this.quiet
     }
 
     public get StatusLabel(): string
     {
-        return this.quiet ? ConnectionPageViewModel.QuietLabel : ConnectionPageViewModel.ConnectedLabel
+        const P = ConnectionPageViewModel
+        switch (this.kind)
+        {
+            case ConnectionKind.Standalone:
+                return P.StandaloneLabel
+            case ConnectionKind.NotEnrolled:
+                return P.NotEnrolledLabel
+            default:
+                return this.quiet ? P.QuietLabel : P.ConnectedLabel
+        }
     }
 
     public get Headline(): string
     {
-        return this.quiet ? ConnectionPageViewModel.QuietHeadline : ConnectionPageViewModel.ConnectedHeadline
+        const P = ConnectionPageViewModel
+        switch (this.kind)
+        {
+            case ConnectionKind.Standalone:
+                return P.StandaloneHeadline
+            case ConnectionKind.NotEnrolled:
+                return P.NotEnrolledHeadline
+            default:
+                return this.quiet ? P.QuietHeadline : P.ConnectedHeadline
+        }
     }
 
     public get HiveLabel(): string
@@ -132,33 +193,47 @@ export class ConnectionPageViewModel extends TenantPageViewModel
         }
         let rollout: HiveRolloutDto | undefined
         let quiet = false
+        let kind = ConnectionKind.Channel
         try
         {
             rollout = await this.Session.Client.GetRollout(hiveId)
         }
         catch (e)
         {
-            if (!(e instanceof ApiError && e.Status === ApiError.UnavailableStatus))
+            if (EngineConnection.IsStandalone(e))
+            {
+                kind = ConnectionKind.Standalone
+            }
+            else if (EngineConnection.IsNotEnrolled(e))
+            {
+                kind = ConnectionKind.NotEnrolled
+            }
+            else if (e instanceof ApiError && e.Status === ApiError.UnavailableStatus)
+            {
+                quiet = true
+            }
+            else
             {
                 throw e
             }
-            quiet = true
         }
         if (generation !== this.LoadGeneration)
         {
             return false
         }
-        this.Apply(quiet, rollout)
+        this.Apply(quiet, rollout, kind)
         return true
     }
 
-    private Apply(quiet: boolean, rollout: HiveRolloutDto | undefined): void
+    private Apply(quiet: boolean, rollout: HiveRolloutDto | undefined, kind: ConnectionKind = ConnectionKind.Channel): void
     {
         const P = ConnectionPageViewModel
         const before = [this.StatusLabel, this.Headline, this.TargetVersionText, this.HasRows, this.NoRowsText] as const
+        const flags = [this.HasChannel, this.IsStandalone, this.IsNotEnrolled, this.IsConnected] as const
         const oldRows = this.rows
-        const wasQuiet = this.quiet
+        const wasQuiet = this.IsQuiet
         this.quiet = quiet
+        this.kind = kind
         this.rollout = rollout
         // A fresh collection each load: the list re-binds to it in one step.
         this.rows = new ObservableCollection<ConnectionEnvironmentRowViewModel>()
@@ -166,8 +241,11 @@ export class ConnectionPageViewModel extends TenantPageViewModel
         {
             this.rows.Add(new ConnectionEnvironmentRowViewModel(env))
         }
-        this.RaisePropertyChanged(P.IsQuietProperty, wasQuiet, this.quiet)
-        this.RaisePropertyChanged(P.IsConnectedProperty, !wasQuiet, this.IsConnected)
+        this.RaisePropertyChanged(P.IsQuietProperty, wasQuiet, this.IsQuiet)
+        this.RaisePropertyChanged(P.IsConnectedProperty, flags[3], this.IsConnected)
+        this.RaisePropertyChanged(P.HasChannelProperty, flags[0], this.HasChannel)
+        this.RaisePropertyChanged(P.IsStandaloneProperty, flags[1], this.IsStandalone)
+        this.RaisePropertyChanged(P.IsNotEnrolledProperty, flags[2], this.IsNotEnrolled)
         this.RaisePropertyChanged(P.StatusLabelProperty, before[0], this.StatusLabel)
         this.RaisePropertyChanged(P.HeadlineProperty, before[1], this.Headline)
         this.RaisePropertyChanged(P.TargetVersionTextProperty, before[2], this.TargetVersionText)

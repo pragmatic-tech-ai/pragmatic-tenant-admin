@@ -34,6 +34,34 @@ describe('ConnectionPageViewModel', () =>
         assert.equal(page.NoRowsText, 'Running versions are unavailable while the link is quiet.')
     })
 
+    it('a standalone engine (404 engine-standalone) is a state with no channel and no connect offer', async () =>
+    {
+        const api = new FakeTenantApi()
+        api.FailOn.set('GetRollout', new ApiError(404, 'This hive runs standalone', 'engine-standalone'))
+        const page = new ConnectionPageViewModel(new TenantTestHost(api).Session)
+        await page.Refresh()
+        assert.equal(page.State, PageState.Populated)
+        assert.equal(page.IsStandalone, true)
+        assert.equal(page.IsNotEnrolled, false)
+        assert.equal(page.HasChannel, false)
+        assert.equal(page.IsConnected, false)
+        assert.equal(page.StatusLabel, 'Standalone')
+        assert.match(page.Headline, /never contacts Pragmatic/)
+    })
+
+    it('a connected engine before enrolment (503 hive-not-enrolled) offers Connect this hive', async () =>
+    {
+        const api = new FakeTenantApi()
+        api.FailOn.set('GetRollout', new ApiError(503, 'not connected yet', 'hive-not-enrolled'))
+        const page = new ConnectionPageViewModel(new TenantTestHost(api).Session)
+        await page.Refresh()
+        assert.equal(page.State, PageState.Populated)
+        assert.equal(page.IsNotEnrolled, true)
+        assert.equal(page.IsQuiet, false, 'not the quiet link')
+        assert.equal(page.StatusLabel, 'Not connected')
+        assert.match(page.Headline, /not connected to Pragmatic yet/)
+    })
+
     it('is Empty without a hive and Denied on 403', async () =>
     {
         const api = new FakeTenantApi()
