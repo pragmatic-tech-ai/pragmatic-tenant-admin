@@ -7,7 +7,7 @@ import { NavigationService } from '@pragmatic-tech-ai/mural/framework/shell/serv
 import { ApiError, type TenantApiClient } from '../../tenant-api-client.js'
 import { ConfigurationApplyOutcome, ConsoleAddressOptionDto, EnvStatus, EnvType, Template } from '../../tenant-types.js'
 import type { ConfigurationPreparationDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationOptionDto, ConfigurationTargetDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto } from '../../tenant-types.js'
-import type { AdminCapabilitiesDto, AdminSnapshotDto, AdoptionLedgerDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnrolHiveParams, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveEnrolmentDto, HiveHealthDto, HiveRolloutDto, IssueTokenParams, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TeamMemberDto, TenantEvent, TenantProfileDto, TokenIssuedDto } from '../../tenant-types.js'
+import type { AdminCapabilitiesDto, AdminSnapshotDto, AdoptionLedgerDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnrolHiveParams, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveEnrolmentDto, HiveHealthDto, HiveRolloutDto, IssueTokenParams, KeptIntentDto, KeptIntentListingDto, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TeamMemberDto, TenantEvent, TenantProfileDto, TokenIssuedDto } from '../../tenant-types.js'
 import { AppSession, type IPageReloader } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { Signal } from '@pragmatic-tech-ai/todl-runtime'
 import { TenantSessionService } from '../tenant-session-service.js'
@@ -450,6 +450,43 @@ export class FakeTenantApi
         const current = this.Enrolment ?? FakeTenantApi.NotEnrolled()
         this.Enrolment = { ...current, Enrolled: true, HiveId: 'hvabcdefghij', Tenant: 'acme', Level: params.Level }
         return { ...this.Enrolment }
+    }
+
+    // The hive's kept intents (C3.4); undefined answers 404 (a console that is not a connected engine's).
+    public Intents: KeptIntentDto[] | undefined
+    public readonly Decided: { Id: string, Digest: string, Approve: boolean }[] = []
+
+    public async ListIntents(): Promise<KeptIntentListingDto>
+    {
+        await this.Enter('ListIntents')
+        if (this.Intents === undefined)
+        {
+            throw new ApiError(ApiError.NotFoundStatus, 'Not found')
+        }
+        return { Intents: this.Intents.map(intent => ({ ...intent })) }
+    }
+
+    public async ApproveIntent(intentId: string, intentDigest: string): Promise<KeptIntentDto>
+    {
+        return await this.DecideIntent('ApproveIntent', intentId, intentDigest, true)
+    }
+
+    public async RejectIntent(intentId: string, intentDigest: string): Promise<KeptIntentDto>
+    {
+        return await this.DecideIntent('RejectIntent', intentId, intentDigest, false)
+    }
+
+    private async DecideIntent(method: string, intentId: string, intentDigest: string, approve: boolean): Promise<KeptIntentDto>
+    {
+        await this.Enter(method, intentId, intentDigest)
+        this.Decided.push({ Id: intentId, Digest: intentDigest, Approve: approve })
+        const intent = (this.Intents ?? []).find(candidate => candidate.IntentId === intentId)
+        if (intent === undefined)
+        {
+            throw new ApiError(404, 'refused', 'unknown-intent')
+        }
+        intent.Progress = approve ? 'applying' : 'rejected'
+        return { ...intent }
     }
 
     // A connected engine before enrolment, reached on its own domain (or as given).

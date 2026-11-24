@@ -15,6 +15,7 @@
 
 import TenantSessionService from "./shell/tenant-session-service.js"
 import OverviewSectionService from "./sections/overview/overview-section-service.js"
+import ApprovalsSectionService from "./sections/approvals/approvals-section-service.js"
 
 resources AppResources {
     DataTemplate [ DataType = TenantSessionService ] {
@@ -30,6 +31,11 @@ resources AppResources {
                 StackPanel [ DockPanel.Dock = Right, Orientation = Horizontal, VerticalAlignment = Center ] {
                     TextBlock [ Text = $Email, Style = @UiLabel, Foreground = @Fg0, Margin = (0,0,8,0) ]
                     TextBlock [ Text = $RoleLabel, Style = @UiCaption, Foreground = @Fg2 ]
+                }
+                // The platform's changes waiting for a decision (C3.4): hidden at none.
+                Button [ DockPanel.Dock = Right, Variant = Secondary, Command = $service(ApprovalsSectionService).OpenCommand, Margin = (0,0,16,0),
+                         Visibility = $service(ApprovalsSectionService).HasPending << ToVisibility ] {
+                    TextBlock [ Text = $service(ApprovalsSectionService).PendingText ]
                 }
                 Button [ DockPanel.Dock = Right, Variant = Text, Command = $service(OverviewSectionService).OpenActivityCommand,
                          Margin = (0,0,16,0) ] {

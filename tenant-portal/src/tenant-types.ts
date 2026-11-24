@@ -127,6 +127,21 @@ export type HiveEnrolmentDto = {
     ConsoleAddress: { Option: ConsoleAddressOptionDto; HostName: string; NeedsIngressAddress: boolean }
 }
 
+// One platform intent the hive keeps (C3.4), as the console's tenant API answers it (the hive protocol's KeptIntentView).
+export type KeptIntentDto = {
+    IntentId: string
+    IntentDigest: string
+    Level: string
+    Action: Record<string, unknown> & { Kind: string }
+    IssuedAt: string
+    ExpiresAt: string
+    Progress: string
+    Failure: string | null
+}
+
+// The hive's kept intents (newest first).
+export type KeptIntentListingDto = { Intents: KeptIntentDto[] }
+
 // What "connect this hive" sends: the one-time code, the level and (on the plain hive subdomain) the ingress address.
 export type EnrolHiveParams = { Code: string; Level: EnrolmentLevel; IngressAddress?: string }
 

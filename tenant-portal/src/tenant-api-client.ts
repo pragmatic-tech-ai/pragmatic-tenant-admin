@@ -1,7 +1,7 @@
 import { ApiError, AppSessionClient, BrowserPage, type FetchFunction, type IPageLocation } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantShell } from './shell/tenant-shell.js'
 import { TenantEventType } from './tenant-types.js'
-import type { AdminSnapshotDto, AdoptionLedgerDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnrolHiveParams, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveEnrolmentDto, HiveHealthDto, HiveRolloutDto, IReleasesSource, IssueTokenParams, ISecurityModelSource, ITokensSource, IUsersAccessSource, IWebSocketFactory, IWebSocketLike, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TenantEvent, TeamMemberDto, TenantProfileDto, TokenIssuedDto } from './tenant-types.js'
+import type { AdminSnapshotDto, AdoptionLedgerDto, ConfigurationApplyDto, ConfigurationSecretDto, ConfigurationComponentDetailDto, ConfigurationComponentDto, ConfigurationDiffDto, ConfigurationVersionDto, ConfigurationVersionSummaryDto, CreateAccountParams, CreateEnvironmentParams, CreateGraphParams, EmailDomainsDto, EnrolHiveParams, EnvironmentDto, GrantMutationDto, GraphDto, HiveDto, HiveEnrolmentDto, HiveHealthDto, HiveRolloutDto, IReleasesSource, KeptIntentDto, KeptIntentListingDto, IssueTokenParams, ISecurityModelSource, ITokensSource, IUsersAccessSource, IWebSocketFactory, IWebSocketLike, ManifestDto, SecurityCatalogDto, SecurityChangesDto, SecurityModelDto, ServiceTokenSummaryDto, TenantEvent, TeamMemberDto, TenantProfileDto, TokenIssuedDto } from './tenant-types.js'
 
 // The shell's error type: thrown for every non-2xx tenant-surface answer, its message the server's error text.
 export { ApiError }
@@ -61,6 +61,9 @@ export class TenantApiClient extends AppSessionClient implements IReleasesSource
     private static readonly HivesRoute = '/tenant-api/hives'
     private static readonly EnrolmentRoute = '/tenant-api/hive/enrolment'
     private static readonly EnrolRoute = '/tenant-api/hive/enrol'
+    private static readonly IntentsRoute = '/tenant-api/intents'
+    private static readonly ApproveLeaf = '/approve'
+    private static readonly RejectLeaf = '/reject'
     private static readonly EnvironmentsRoute = '/tenant-api/environments'
     private static readonly ManifestsRoute = '/tenant-api/manifests'
     private static readonly EventsRoute = '/tenant-api/events'
@@ -156,6 +159,23 @@ export class TenantApiClient extends AppSessionClient implements IReleasesSource
     public async EnrolHive(params: EnrolHiveParams): Promise<HiveEnrolmentDto>
     {
         return await this.Post<HiveEnrolmentDto>(TenantApiClient.EnrolRoute, params)
+    }
+
+    // The platform's intents the hive keeps (C3.4; a connected engine only, 404 elsewhere).
+    public async ListIntents(): Promise<KeptIntentListingDto>
+    {
+        return await this.Get<KeptIntentListingDto>(TenantApiClient.IntentsRoute)
+    }
+
+    // Approves the intent the page showed (by its digest; tenant role admin); a refusal is an ApiError with its code.
+    public async ApproveIntent(intentId: string, intentDigest: string): Promise<KeptIntentDto>
+    {
+        return await this.Post<KeptIntentDto>(TenantApiClient.IntentsRoute + TenantApiClient.PathSeparator + encodeURIComponent(intentId) + TenantApiClient.ApproveLeaf, { IntentDigest: intentDigest })
+    }
+
+    public async RejectIntent(intentId: string, intentDigest: string): Promise<KeptIntentDto>
+    {
+        return await this.Post<KeptIntentDto>(TenantApiClient.IntentsRoute + TenantApiClient.PathSeparator + encodeURIComponent(intentId) + TenantApiClient.RejectLeaf, { IntentDigest: intentDigest })
     }
 
     public async GetRollout(hiveId: string): Promise<HiveRolloutDto>

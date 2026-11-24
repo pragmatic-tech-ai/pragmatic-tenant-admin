@@ -22,7 +22,7 @@ describe('app.mu composition', () =>
         const nav = (shell as EditorShell).Services.get(NavigationService.Key)
         assert.ok(nav !== undefined)
         const items = nav.Items.ToArray().map(i => i as NavigationDestination)
-        assert.deepEqual(items.map(i => i.Label), ['Overview', 'Environments', 'Users & Access', 'Releases', 'Settings', 'Configuration', 'Connection status'])
+        assert.deepEqual(items.map(i => i.Label), ['Overview', 'Environments', 'Users & Access', 'Releases', 'Settings', 'Configuration', 'Connection status', 'Approvals'])
         for (const item of items)
         {
             assert.ok(item.Icon instanceof Geometry, item.Label + ' has no icon')

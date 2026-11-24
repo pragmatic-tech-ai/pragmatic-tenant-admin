@@ -26,6 +26,8 @@ export class TenantIcons extends ResourceDictionary {
         t.Set("ConnectionIcon", _inc5);
         const _inc6 = new GeometryGroup([new RectangleGeometry(new Rect(6, 3, 3, 2), 0, 0), new RectangleGeometry(new Rect(4, 3, 2, 8), 0, 0), new RectangleGeometry(new Rect(2, 11, 2, 2), 0, 0), new RectangleGeometry(new Rect(4, 13, 2, 8), 0, 0), new RectangleGeometry(new Rect(6, 19, 3, 2), 0, 0), new RectangleGeometry(new Rect(15, 3, 3, 2), 0, 0), new RectangleGeometry(new Rect(18, 3, 2, 8), 0, 0), new RectangleGeometry(new Rect(20, 11, 2, 2), 0, 0), new RectangleGeometry(new Rect(18, 13, 2, 8), 0, 0), new RectangleGeometry(new Rect(15, 19, 3, 2), 0, 0), new RectangleGeometry(new Rect(10, 11, 4, 2), 0, 0)]);
         t.Set("ConfigurationIcon", _inc6);
+        const _inc7 = new GeometryGroup([new PathGeometry([new PathFigure(new Point(6, 2), [new LineSegment(new Point(15, 2)), new LineSegment(new Point(20, 7)), new LineSegment(new Point(20, 22)), new LineSegment(new Point(4, 22)), new LineSegment(new Point(4, 2))], true), new PathFigure(new Point(14, 3.5), [new LineSegment(new Point(14, 8)), new LineSegment(new Point(18.5, 8))], true)]), new PathGeometry([new PathFigure(new Point(7.5, 14.5), [new LineSegment(new Point(9, 13)), new LineSegment(new Point(11, 15)), new LineSegment(new Point(15.5, 10.5)), new LineSegment(new Point(17, 12)), new LineSegment(new Point(11, 18))], true)])]);
+        t.Set("ApprovalsIcon", _inc7);
         return t;
     }
 }

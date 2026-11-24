@@ -15,6 +15,8 @@ export enum TenantAdminRegistry
     EmailDomains = 'console_email_domains',
     Registration = 'console_registration',
     OwnerResetApplied = 'owner_reset_applied',
+    /** Which environment each create-environment intent created (C3.4: a retried intent is not a clash). */
+    IntentEnvironments = 'intent_environments',
     DirectorySeed = 'directory_seed',
     VerifiedImages = 'verified_images',
     /** The completion record of the one-time import of a pre-A5 data root (written last, in the import's transaction). */

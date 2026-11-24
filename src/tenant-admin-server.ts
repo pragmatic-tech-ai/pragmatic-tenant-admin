@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { UserSeeder, AdminProxy, WsAdminConnector, AuditRegistry, BundleBuilderAdapter, UserSeederAdapter, NoHostEnvironmentRuntime, EnvironmentRuntimeResolver, InClusterEnvironmentRuntime, EnvironmentPlacement, EnvironmentRegistry, EnvironmentService, GraphService, TenantGraphAccess, type IEnvironmentReach, HiveHealthProducer, HiveOrchestratorFactory, type InClusterOrchestration, IngressTlsPolicy, type IngressTls, IdpAdminClient, type IIdpService, MasterKeyFile, NetPortProbe, PortAllocator, TenantPlaneComposer, type HiveRecord, type TenantRecord, ConsoleFingerprint, ConsoleAdvertSender, HttpConsoleAdvertTransport, IntervalAdvertTimer, SeededConsoleAccounts, type IOwnerResetFollower, ConsoleEmailDomainStore, ConsoleFingerprintKeys, ConsoleRegistration, type IRecordMap, type IRolloutClient, TenantAdminEnv, TenantAdminClientRegistry, TenantHostResolver, type ConsoleHostAlias, type TenantPlane, TenantSessions, TenantHealthMonitor, TenantConsoleHost } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { UserSeeder, AdminProxy, WsAdminConnector, AuditRegistry, BundleBuilderAdapter, UserSeederAdapter, NoHostEnvironmentRuntime, EnvironmentRuntimeResolver, InClusterEnvironmentRuntime, EnvironmentPlacement, EnvironmentRegistry, EnvironmentService, GraphService, TenantGraphAccess, type IEnvironmentReach, HiveHealthProducer, HiveOrchestratorFactory, type InClusterOrchestration, IngressTlsPolicy, type IngressTls, IdpAdminClient, type IIdpService, MasterKeyFile, NetPortProbe, PortAllocator, TenantPlaneComposer, type HiveRecord, type TenantRecord, ConsoleFingerprint, ConsoleAdvertSender, HttpConsoleAdvertTransport, IntervalAdvertTimer, SeededConsoleAccounts, type IOwnerResetFollower, ConsoleEmailDomainStore, ConsoleFingerprintKeys, ConsoleRegistration, type IRecordMap, type IRolloutClient, TenantAdminEnv, TenantAdminClientRegistry, TenantHostResolver, type ConsoleHostAlias, type TenantPlane, TenantSessions, TenantHealthMonitor, TenantConsoleHost, type IEnvironmentService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { InClusterEnvironmentReach } from './in-cluster-environment-reach.js'
 import { HttpsKubeTransport, InClusterServiceAccount, KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import type { PinnedImageVerifier } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
@@ -28,6 +28,12 @@ import { EngineComposition } from './engine-composition.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
 import { EngineRolloutClient } from './tenant-api/engine-rollout-client.js'
 import { EngineConsoleHost } from './enrolment/engine-console-host.js'
+import { OpenSslTlsMinter } from './bootstrap/tls-minter.js'
+import { AgentCallerCheck } from './intents/agent-caller-check.js'
+import { ConsoleCertificateRenewal } from './intents/console-certificate-renewal.js'
+import { EnvironmentIntentApplier } from './intents/environment-intent-applier.js'
+import { EnvironmentIntentEndpoint } from './intents/environment-intent-endpoint.js'
+import { IntentEndpointLog } from './intents/intent-endpoint-log.js'
 
 export type TenantAdminConfig = {
     readonly dataRoot: string
@@ -73,6 +79,8 @@ export type TenantAdminComposition = {
     /** Moves the C3.1 interim secrets into the realm secrets home at start; undefined without one, or outside a pod. */
     readonly migration: InterimSecretMigration | undefined
     readonly directory: SeededTenantDirectory
+    /** The internal intent endpoint the hive agent forwards to (C3.4); undefined unless a connected engine in a pod names the agent. */
+    readonly intents: EnvironmentIntentEndpoint | undefined
     readonly rollout: IRolloutClient
     readonly plane: TenantPlane
     readonly host: TenantConsoleHost
@@ -459,12 +467,13 @@ export class TenantAdminServer
         }
         // A connected engine's console also serves "connect this hive" (C3.3), through its hive agent.
         const enrolment = EngineConsoleHost.EnrolmentRoutesOf(env)
-        const host = enrolment === undefined ? new TenantConsoleHost(hostOptions) : new EngineConsoleHost(hostOptions, enrolment)
+        const host = enrolment === undefined ? new TenantConsoleHost(hostOptions) : new EngineConsoleHost(hostOptions, enrolment, EngineConsoleHost.IntentRoutesOf(env))
         // An operator Owner reset reaches this console in the advert answer; the follower then ends the Owner's sessions, sockets
         // and relays (the host has attached both to plane.principals above).
+        const intents = await TenantAdminServer.IntentEndpointOf(env, account, inCluster?.client, db, service, directory, engine, cfg, log)
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
-        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer, engine, idp: idpService, environments: registry, kube: inCluster?.client,
+        return { directory, intents, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer, engine, idp: idpService, environments: registry, kube: inCluster?.client,
             preparation: configuration.Preparer === undefined ? undefined : new PreparationSchedule(configuration.Preparer, log), migration: configuration.Migration }
     }
 
@@ -510,6 +519,8 @@ export class TenantAdminServer
             : self.AwaitReady(repository, tenantId, awaiting)
                 .then(outcome => log(TenantAdminServer.SelfApplyPrefix + outcome))
                 .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
+        // The agent's internal intent endpoint, beside the public listener (a connected engine only).
+        await composition.intents?.Listen()
         // Only a listener that bound counts as running, so Close after a failed Listen has nothing to stop.
         this.running = composition
         this.ownsDatabase = database === undefined
@@ -555,6 +566,7 @@ export class TenantAdminServer
         this.selfReadiness = undefined
         try
         {
+            await composition.intents?.Close()
             await composition.host.Close()
         }
         finally
@@ -565,6 +577,31 @@ export class TenantAdminServer
                 await composition.database.Close()
             }
         }
+    }
+
+    /**
+     * The internal intent endpoint (C3.4) of a connected engine in a pod whose chart names the agent's service account:
+     * environment intents applied through this console's own environment service, the ingress certificate renewed when the
+     * engine minted it. Undefined for any other console.
+     */
+    public static async IntentEndpointOf(env: NodeJS.ProcessEnv, account: InClusterServiceAccount | undefined, client: KubeApiClient | undefined, db: TenantAdminDatabase, service: IEnvironmentService, directory: SeededTenantDirectory, engine: EngineComposition, cfg: TenantAdminConfig, log: (line: string) => void): Promise<EnvironmentIntentEndpoint | undefined>
+    {
+        const agent = EngineEnv.OptionalOf(env, EngineEnv.AgentServiceAccount)
+        if (engine.Mode !== EngineMode.Connected || agent === undefined || account === undefined || client === undefined)
+        {
+            return undefined
+        }
+        const tenant = directory.Tenant
+        const consoleHost = EngineEnv.OptionalOf(env, TenantAdminEnv.ConsoleHost)
+        const certificate = consoleHost === undefined ? undefined : new ConsoleCertificateRenewal(client, new OpenSslTlsMinter(), cfg.ingressTls?.secretName, tenant.id, consoleHost, cfg.baseDomain, engine)
+        const applier = new EnvironmentIntentApplier({
+            Service: service,
+            HiveId: () => TenantAdminServer.FirstHiveOf(directory).id,
+            EngineVersion: EngineEnv.OptionalOf(env, EngineEnv.EngineVersion),
+            Created: await db.Map<string>(TenantAdminRegistry.IntentEnvironments),
+            Certificate: certificate,
+        })
+        return new EnvironmentIntentEndpoint(applier, new AgentCallerCheck(new HttpsKubeTransport(account), agent), new IntentEndpointLog(log))
     }
 
     private static AdvertOff(log: (line: string) => void, reason: string): undefined

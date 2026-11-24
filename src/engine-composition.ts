@@ -3,6 +3,7 @@ import { PostgresPoolFactory } from '@pragmatic-tech-ai/pragmatic-realm-custom'
 import { EnvironmentRealmSecrets, K8sManifestBuilder, type EngineEnvironment, type IIdpService, type IngressTls, type TenantRecord } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import type { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { IngressTlsCopies } from './ingress-tls-copies.js'
+import type { ICertificateCopies } from './intents/console-certificate-renewal.js'
 import { InitialOwnerSeeder } from './bootstrap/initial-owner-seeder.js'
 import { EngineEnv, EngineMode } from './engine-mode.js'
 import { HivePostgresProvisioner } from './environments/hive-postgres-provisioner.js'
@@ -12,7 +13,7 @@ import { MountedRealmSecretsMaterial } from './environments/realm-secrets-databa
  * What a chart-installed management engine adds to the console (nothing for a console the platform pushed): its mode, the
  * release images and the hive's Postgres environments run on, and the seeding of the realm's first local admin.
  */
-export class EngineComposition
+export class EngineComposition implements ICertificateCopies
 {
     private static readonly ApplicationName = 'pragmatic-tenant-admin-provisioner'
     private static readonly PartialImages = 'the engine chart sets both PRAGMATIC_TENANT_ADMIN_ENV_SERVER_IMAGE and PRAGMATIC_TENANT_ADMIN_UI_UNPACK_IMAGE, or neither'
@@ -87,6 +88,12 @@ export class EngineComposition
         const namespaces = (): readonly string[] => [K8sManifestBuilder.IdpNameOf(tenantId), ...environments().map(name => K8sManifestBuilder.NamespaceOf(name))]
         this.copies = new IngressTlsCopies(client, K8sManifestBuilder.SystemNamespace, tls.secretName, namespaces, log)
         this.copies.Start()
+    }
+
+    /** One pass of the certificate copies now (after a renewal); nothing when the engine keeps none. */
+    public async RefreshCopies(): Promise<void>
+    {
+        await this.copies?.Tick()
     }
 
     public async Close(): Promise<void>

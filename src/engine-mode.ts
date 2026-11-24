@@ -33,6 +33,11 @@ export class EngineEnv
     public static readonly AgentUrl = 'PRAGMATIC_TENANT_ADMIN_AGENT_URL'
     /** The console's projected service-account token for the audience `pragmatic-hive-agent` (C3.3). */
     public static readonly AgentTokenFile = 'PRAGMATIC_TENANT_ADMIN_AGENT_TOKEN_FILE'
+    /** The hive agent's service account (`system:serviceaccount:pragmatic-system:<agent>`): the only caller of the console's
+     *  internal intent endpoint (C3.4). Unset: the endpoint is not served. */
+    public static readonly AgentServiceAccount = 'PRAGMATIC_ENGINE_AGENT_SERVICE_ACCOUNT'
+    /** The engine's release version (the chart's): the only version an environment intent may name (C3.4). */
+    public static readonly EngineVersion = 'PRAGMATIC_ENGINE_VERSION'
     private static readonly UnknownModePrefix = 'PRAGMATIC_ENGINE_MODE has an unknown value: '
     private static readonly Empty = ''
 

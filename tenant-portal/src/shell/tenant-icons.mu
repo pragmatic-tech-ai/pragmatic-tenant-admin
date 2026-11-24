@@ -14,4 +14,5 @@ resources TenantIcons {
     include "icons/settings.svg"      as SettingsIcon
     include "icons/connection.svg"    as ConnectionIcon
     include "icons/configuration.svg" as ConfigurationIcon
+    include "icons/approvals.svg"     as ApprovalsIcon
 }

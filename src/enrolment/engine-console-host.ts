@@ -4,6 +4,8 @@ import { TenantAdminEnv, TenantConsoleHost, type TenantConsoleHostOptions } from
 import { EngineEnv, EngineMode } from '../engine-mode.js'
 import { EngineConsoleAddress, EnrolmentRoutes } from './enrolment-routes.js'
 import { HiveEnrolmentClient } from './hive-enrolment-client.js'
+import { HiveIntentsClient } from '../intents/hive-intents-client.js'
+import { PlatformIntentRoutes } from '../intents/platform-intent-routes.js'
 
 /** A connected engine's enrolment setting is missing or wrong (names the setting, never a value). */
 export class EngineEnrolmentSettingError extends Error
@@ -29,9 +31,20 @@ export class EngineConsoleHost extends TenantConsoleHost
     public static readonly DefaultAgentTokenFile = '/var/run/secrets/pragmatic-hive-agent/token'
     private static readonly BadOption = 'must be own-domain, hive-subdomain or relayed-hive-subdomain'
 
-    public constructor(options: TenantConsoleHostOptions, private readonly enrolment: EnrolmentRoutes)
+    public constructor(options: TenantConsoleHostOptions, private readonly enrolment: EnrolmentRoutes, private readonly intents?: PlatformIntentRoutes)
     {
         super(options)
+    }
+
+    /** The platform's intents (C3.4): the same connected engines as the enrolment routes, through the same agent. */
+    public static IntentRoutesOf(env: NodeJS.ProcessEnv): PlatformIntentRoutes | undefined
+    {
+        const agentUrl = EngineEnv.OptionalOf(env, EngineEnv.AgentUrl)
+        if (EngineEnv.ModeOf(env) !== EngineMode.Connected || agentUrl === undefined)
+        {
+            return undefined
+        }
+        return new PlatformIntentRoutes(new HiveIntentsClient(agentUrl, EngineEnv.OptionalOf(env, EngineEnv.AgentTokenFile) ?? EngineConsoleHost.DefaultAgentTokenFile))
     }
 
     /** The enrolment routes a connected engine's settings name; undefined for any other console. */
@@ -58,6 +71,7 @@ export class EngineConsoleHost extends TenantConsoleHost
     {
         const table = super.Routes()
         this.enrolment.Register(table)
+        this.intents?.Register(table)
         return table
     }
 

@@ -1,4 +1,5 @@
 import { AppResources } from "./app.resources.mu.js";
+import { ApprovalsModule } from "./sections/approvals/approvals.module.mu.js";
 import { ConfigurationModule } from "./sections/configuration/configuration.module.mu.js";
 import { ConnectionModule } from "./sections/connection/connection.module.mu.js";
 import { EnvironmentsModule } from "./sections/environments/environments.module.mu.js";
@@ -35,6 +36,7 @@ export const app = (() => {
     _app0.AddModule(SettingsModule);
     _app0.AddModule(ConfigurationModule);
     _app0.AddModule(ConnectionModule);
+    _app0.AddModule(ApprovalsModule);
     const _rd1 = _app0.Resources;
     for (const [_k, _v] of AppShellResources.Clone().Entries()) _rd1.Set(_k, _v);
     for (const [_k, _v] of ShellResources.Clone().Entries()) _rd1.Set(_k, _v);

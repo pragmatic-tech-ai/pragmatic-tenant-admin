@@ -26,6 +26,7 @@ import UsersAccessModule from "./sections/users-access/users-access.module.mu.js
 import ReleasesModule from "./sections/releases/releases.module.mu.js"
 import SettingsModule from "./sections/settings/settings.module.mu.js"
 import ConnectionModule from "./sections/connection/connection.module.mu.js"
+import ApprovalsModule from "./sections/approvals/approvals.module.mu.js"
 import ConfigurationModule from "./sections/configuration/configuration.module.mu.js"
 import AppShellResources from "@pragmatic-tech-ai/pragmatic-app-shell"
 import AppResources from "./app.resources.mu.js"
@@ -57,6 +58,7 @@ Application [ Theme = Pragmatic, Scheme = PragmaticDark ] {
         SettingsModule
         ConfigurationModule
         ConnectionModule
+        ApprovalsModule
     }
 
     resources: {
