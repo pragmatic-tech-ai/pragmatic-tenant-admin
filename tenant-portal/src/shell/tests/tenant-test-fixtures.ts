@@ -161,6 +161,8 @@ export class FakeTenantApi
     public IssuedTokenValue = 'fixture-issued-token'
     public Failure: Error | undefined
     public readonly FailOn = new Map<string, Error>()
+    // Errors the next calls of a named method reject with, one per call, before FailOn (a console that is restarting).
+    public readonly FailNext = new Map<string, Error[]>()
     public readonly Calls: Array<[string, ...unknown[]]> = []
     // Push delivers a chunk; Late delivers one even after the stream closed (a
     // frame already in flight); ServerClose closes it from the server side.
@@ -652,7 +654,7 @@ export class FakeTenantApi
     {
         this.Calls.push([method, ...args])
         await Promise.resolve()
-        const failure = this.FailOn.get(method) ?? this.Failure
+        const failure = this.FailNext.get(method)?.shift() ?? this.FailOn.get(method) ?? this.Failure
         if (failure !== undefined)
         {
             throw failure

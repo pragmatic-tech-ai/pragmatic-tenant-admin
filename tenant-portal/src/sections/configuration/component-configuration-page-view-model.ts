@@ -1,4 +1,5 @@
 import { ObservableCollection, RelayCommand } from '@pragmatic-tech-ai/mural/runtime'
+import { ApiError } from '../../tenant-api-client.js'
 import { AdminCapability } from '../../shell/admin-capability.js'
 import { OptionViewModel } from '@pragmatic-tech-ai/pragmatic-app-shell'
 import { TenantPageViewModel } from '../../shell/tenant-page-view-model.js'
@@ -6,6 +7,7 @@ import type { TenantSessionService } from '../../shell/tenant-session-service.js
 import { ConfigurationApplyDetails, ConfigurationApplyOutcome } from '../../tenant-types.js'
 import type { ConfigurationApplyDto, ConfigurationComponentDetailDto, ConfigurationDiffDto, ConfigurationPreparationDto, ConfigurationTargetDto } from '../../tenant-types.js'
 import { ConfigurationPreparationOutcome } from '../../tenant-types.js'
+import { TimerConfigurationApplyWait, type IConfigurationApplyWait } from './configuration-apply-wait.js'
 import { ConfigurationEditorViewModel } from './configuration-editor-view-model.js'
 import type { IConfigurationNavigator } from './configuration-page-view-model.js'
 import { ConfigurationApplyRowViewModel, ConfigurationChangeRowViewModel, ConfigurationSettingRowViewModel, ConfigurationTargetRowViewModel, ConfigurationText, ConfigurationVersionRowViewModel } from './configuration-rows.js'
@@ -65,7 +67,15 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private static readonly ApplyingPrefix = 'Applying version '
     private static readonly ApplyingSuffix = ': waiting up to two minutes for the new pods to become ready.'
     private static readonly ConsoleComponent = 'pragmatic-tenant-admin'
-    private static readonly ConsoleApplyingSuffix = ': the console restarts with it; reload this page in a minute. A configuration it cannot start with is put back.'
+    private static readonly ConsoleApplyingSuffix = ': the console restarts with it, and this page waits until it answers. A configuration it cannot start with is put back.'
+    private static readonly ConsoleRestartingSuffix = '… the console is restarting; this page reconnects when it answers, then shows the outcome.'
+    private static readonly RestartTimeoutText = 'The console did not answer within five minutes: reload this page to see how the apply ended.'
+    /** Between reads while the console its own apply restarted comes back, and how many reads (five minutes in all: the
+     *  console proves itself for up to 180 s after the request, 30 s more after a late start). */
+    private static readonly RestartPollMs = 3000
+    private static readonly RestartPolls = 100
+    /** What the ingress answers while the console's pod is gone (bad gateway, unavailable, gateway timeout). */
+    private static readonly DroppedStatuses: readonly number[] = [502, 503, 504]
     private static readonly RevertedPrefix = 'Version '
     private static readonly RevertedInfix = ' did not become ready on '
     private static readonly RevertedSuffix = ': the previous configuration is running again.'
@@ -99,6 +109,7 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private readonly applyCommand: RelayCommand
     private readonly secretCommand: RelayCommand
     private applying = false
+    private restarting = false
     private secretName = ComponentConfigurationPageViewModel.NoText
     private secretValue = ComponentConfigurationPageViewModel.NoText
     private detail: ConfigurationComponentDetailDto | undefined
@@ -122,7 +133,8 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     private noticeText = ComponentConfigurationPageViewModel.NoText
     private resetEditor = true
 
-    public constructor(session: TenantSessionService, private readonly navigator: IConfigurationNavigator, private readonly component: string)
+    public constructor(session: TenantSessionService, private readonly navigator: IConfigurationNavigator, private readonly component: string,
+        private readonly wait: IConfigurationApplyWait = new TimerConfigurationApplyWait())
     {
         super(session)
         this.compareCommand = new RelayCommand(() => { void this.Guard(() => this.Compare()) }, () => this.CanCompare)
@@ -395,7 +407,7 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         return this.noticeText
     }
 
-    // An apply is waiting for its roll (up to two minutes on the server).
+    // An apply is waiting for its roll (up to two minutes on the server), or for the console its own apply restarted.
     public get IsApplying(): boolean
     {
         return this.applying
@@ -405,7 +417,7 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
     {
         const P = ComponentConfigurationPageViewModel
         const version = this.selectedApplyVersion?.Value
-        const suffix = this.component === P.ConsoleComponent ? P.ConsoleApplyingSuffix : P.ApplyingSuffix
+        const suffix = this.restarting ? P.ConsoleRestartingSuffix : this.component === P.ConsoleComponent ? P.ConsoleApplyingSuffix : P.ApplyingSuffix
         return !this.applying || version === undefined ? P.NoText : P.ApplyingPrefix + String(version) + P.ToWord + (this.selectedTarget?.Value ?? P.NoText) + suffix
     }
 
@@ -613,18 +625,90 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel
         {
             return
         }
-        this.SetNotice(ComponentConfigurationPageViewModel.NoText)
+        const P = ComponentConfigurationPageViewModel
+        this.SetNotice(P.NoText)
+        const known = new Set((this.detail?.applies ?? []).map(a => a.id))
         this.SetApplying(true)
         try
         {
-            const record = await this.Session.Client.ApplyConfigurationVersion(this.component, version, environment)
-            this.SetNotice(ComponentConfigurationPageViewModel.ApplyNotice(record))
+            const record = await this.ApplyAndAwait(version, environment, known)
+            this.SetNotice(record === undefined ? P.RestartTimeoutText : P.ApplyNotice(record))
         }
         finally
         {
+            this.SetRestarting(false)
             this.SetApplying(false)
         }
         await this.Refresh()
+    }
+
+    // The apply's record. The console's own apply restarts the console (its Deployment is recreated, its pod stopped), so
+    // the request that started it is usually cut (the ingress answers 502, or nothing answers): that is expected, and the
+    // page then waits for the console to answer again and reads how the apply ended (the restarted console proves itself,
+    // then records it). Undefined when the console did not answer in time. Any other component's failure stays an error.
+    private async ApplyAndAwait(version: number, environment: string, known: ReadonlySet<string>): Promise<ConfigurationApplyDto | undefined>
+    {
+        const P = ComponentConfigurationPageViewModel
+        const own = this.component === P.ConsoleComponent
+        let record: ConfigurationApplyDto
+        try
+        {
+            record = await this.Session.Client.ApplyConfigurationVersion(this.component, version, environment)
+        }
+        catch (e)
+        {
+            if (!own || !P.IsDropped(e))
+            {
+                throw e
+            }
+            return await this.AwaitOwnApply(version, environment, known, undefined)
+        }
+        return own && record.outcome === ConfigurationApplyOutcome.Pending ? await this.AwaitOwnApply(version, environment, known, record.id) : record
+    }
+
+    // Reads the component until the console answers with the apply settled: the record `id` names, or, when the request
+    // was cut before it answered, the one apply of that version to that target this page had not seen before.
+    private async AwaitOwnApply(version: number, environment: string, known: ReadonlySet<string>, id: string | undefined): Promise<ConfigurationApplyDto | undefined>
+    {
+        const P = ComponentConfigurationPageViewModel
+        this.SetRestarting(true)
+        for (let poll = 0; poll < P.RestartPolls; poll++)
+        {
+            await this.wait.Delay(P.RestartPollMs)
+            let detail: ConfigurationComponentDetailDto
+            try
+            {
+                detail = await this.Session.Client.GetConfigurationComponent(this.component)
+            }
+            catch (e)
+            {
+                if (P.IsDropped(e))
+                {
+                    continue
+                }
+                throw e
+            }
+            const record = detail.applies.find(a => id !== undefined ? a.id === id : !known.has(a.id) && a.version === version && a.environment === environment)
+            if (record !== undefined && record.outcome !== ConfigurationApplyOutcome.Pending)
+            {
+                return record
+            }
+        }
+        return undefined
+    }
+
+    private SetRestarting(next: boolean): void
+    {
+        const P = ComponentConfigurationPageViewModel
+        const oldText = this.ApplyingText
+        this.restarting = next
+        this.RaiseIfChanged(P.ApplyingTextProperty, oldText, this.ApplyingText)
+    }
+
+    // A request the console's restart cut: the ingress's gateway answers, or no answer at all (fetch rejects with a TypeError).
+    private static IsDropped(error: unknown): boolean
+    {
+        return error instanceof ApiError ? ComponentConfigurationPageViewModel.DroppedStatuses.includes(error.Status) : error instanceof TypeError
     }
 
     private SetApplying(next: boolean): void

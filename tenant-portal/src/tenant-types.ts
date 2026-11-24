@@ -435,7 +435,8 @@ export type ConfigurationComponentDto = {
     targets: ConfigurationTargetDto[]
 }
 
-export type ConfigurationSettingDto = { name: string; type: string; description: string; required: boolean; secret: boolean; default?: unknown }
+// minimum / maximum: the inclusive range an integer setting accepts (absent from a console before bounds, or none declared).
+export type ConfigurationSettingDto = { name: string; type: string; description: string; required: boolean; secret: boolean; default?: unknown; minimum?: number; maximum?: number }
 
 export type ConfigurationOptionDto = { name: string; description: string; settings: ConfigurationSettingDto[] }
 

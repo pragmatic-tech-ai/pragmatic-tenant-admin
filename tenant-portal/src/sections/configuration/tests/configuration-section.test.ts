@@ -10,7 +10,24 @@ import { ConfigurationSectionService } from '../configuration-section-service.js
 import { ConfigurationPageViewModel, type IConfigurationNavigator } from '../configuration-page-view-model.js'
 import { ComponentConfigurationPageViewModel } from '../component-configuration-page-view-model.js'
 import { ConfigurationEditorViewModel } from '../configuration-editor-view-model.js'
-import { ConfigurationTargetRowViewModel } from '../configuration-rows.js'
+import { ConfigurationSettingRowViewModel, ConfigurationTargetRowViewModel } from '../configuration-rows.js'
+import type { IConfigurationApplyWait } from '../configuration-apply-wait.js'
+import type { ConfigurationApplyDto } from '../../../tenant-types.js'
+
+// Waits nothing; runs `OnWait` (the console coming back, the apply settling) before each read that follows a wait.
+class InstantWait implements IConfigurationApplyWait
+{
+    public Waits = 0
+    public readonly Delays: number[] = []
+    public OnWait: (wait: number) => void = () => undefined
+
+    public async Delay(ms: number): Promise<void>
+    {
+        this.Waits++
+        this.Delays.push(ms)
+        this.OnWait(this.Waits)
+    }
+}
 
 class RecordingNavigator implements IConfigurationNavigator
 {
@@ -48,6 +65,32 @@ class ConfigFixture
         this.Host = new TenantTestHost(this.Api, { ...TenantTestHost.AllCapabilities, settings: canEdit })
     }
 
+    // The console's own configuration (two versions, its one target), whose apply restarts the console.
+    public static readonly Console = 'pragmatic-tenant-admin'
+    public static readonly ConsoleTarget = 'pragmatic-system'
+
+    public async Console(wait: IConfigurationApplyWait): Promise<ComponentConfigurationPageViewModel>
+    {
+        this.Api.WithConfiguration(ConfigFixture.Console, [{ core: { healthProbeMs: 45000 } }, { core: { healthProbeMs: 30000 } }], [ConfigFixture.ConsoleTarget])
+        const page = await this.Component(ConfigFixture.Console, wait)
+        page.SelectedTarget = page.TargetOptions.ToArray()[0]
+        return page
+    }
+
+    // The record the restarted console keeps for its own apply (here written by the test: the request was cut).
+    public SettleConsoleApply(outcome: ConfigurationApplyOutcome, detail: string | null = null, id: string = 'apply-self'): ConfigurationApplyDto
+    {
+        const record: ConfigurationApplyDto = {
+            id, version: 2, environment: ConfigFixture.ConsoleTarget, outcome, requestedBy: 'owner@example.test',
+            requestedAt: '2026-11-24T08:53:58.000Z', completedAt: outcome === ConfigurationApplyOutcome.Pending ? null : '2026-11-24T08:54:50.000Z', detail,
+        }
+        const applies = this.Api.ConfigurationApplies.get(ConfigFixture.Console)!
+        const at = applies.findIndex(a => a.id === id)
+        if (at >= 0) applies.splice(at, 1, record)
+        else applies.unshift(record)
+        return record
+    }
+
     public async List(): Promise<ConfigurationPageViewModel>
     {
         const page = new ConfigurationPageViewModel(this.Host.Session, this.Navigator)
@@ -55,9 +98,9 @@ class ConfigFixture
         return page
     }
 
-    public async Component(component: string = 'graph'): Promise<ComponentConfigurationPageViewModel>
+    public async Component(component: string = 'graph', wait?: IConfigurationApplyWait): Promise<ComponentConfigurationPageViewModel>
     {
-        const page = new ComponentConfigurationPageViewModel(this.Host.Session, this.Navigator, component)
+        const page = new ComponentConfigurationPageViewModel(this.Host.Session, this.Navigator, component, wait)
         await page.Refresh()
         return page
     }
@@ -109,6 +152,14 @@ describe('ComponentConfigurationPageViewModel', () =>
         assert.deepEqual(page.VersionRows.ToArray().map(r => [r.VersionText, r.IsHead]), [['Version 2', true], ['Version 1', false]])
         assert.deepEqual(page.TargetRows.ToArray().map(r => [r.Environment, r.AppliedText]), [['production', 'Nothing applied'], ['staging', 'Nothing applied']])
         assert.equal(page.HasApplies, false)
+    })
+
+    it('shows the range a bounded integer setting accepts beside its type', () =>
+    {
+        const option = { name: 'core', description: '', settings: [] }
+        const row = (bounds: { minimum?: number; maximum?: number }) => new ConfigurationSettingRowViewModel(option, { name: 'drainTimeoutMs', type: 'integer', description: '', required: false, secret: false, ...bounds }).TypeText
+        assert.deepEqual([row({ minimum: 1, maximum: 25000 }), row({ minimum: 1000 }), row({ maximum: 25000 }), row({})],
+            ['integer, 1 to 25000', 'integer, at least 1000', 'integer, at most 25000', 'integer'])
     })
 
     it("views one version's document as indented JSON", async () =>
@@ -294,6 +345,96 @@ describe('ComponentConfigurationPageViewModel', () =>
         assert.equal(page.ApplyCommand.CanExecute(undefined), false)
         await Tick.Settle()
         assert.deepEqual([page.IsApplying, page.ApplyingText], [false, ''])
+    })
+
+    it("the console's own apply: the request its restart cuts (502) is expected; the page says the console is restarting, waits for it, then shows the outcome", async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(502, 'Request failed: 502'))
+        // The console is gone for two reads (the ingress's 502, then no answer at all), then answers with its apply still
+        // being proven, then applied.
+        fx.Api.FailNext.set('GetConfigurationComponent', [new ApiError(502, 'Request failed: 502'), new TypeError('Failed to fetch')])
+        const texts: string[] = []
+        wait.OnWait = n =>
+        {
+            texts.push(page.ApplyingText)
+            if (n === 3) fx.SettleConsoleApply(ConfigurationApplyOutcome.Pending)
+            if (n === 4) fx.SettleConsoleApply(ConfigurationApplyOutcome.Applied)
+        }
+        page.ApplyCommand.Execute()
+        assert.equal(page.IsApplying, true)
+        assert.match(page.ApplyingText, /^Applying version 2 to pragmatic-system: the console restarts with it, and this page waits until it answers/)
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(texts[0], 'Applying version 2 to pragmatic-system… the console is restarting; this page reconnects when it answers, then shows the outcome.')
+        assert.equal(wait.Waits, 4)
+        assert.ok(wait.Delays.every(ms => ms === 3000))
+        assert.deepEqual([page.IsApplying, page.ApplyingText, page.CommandErrorText], [false, '', ''], 'no error is shown')
+        assert.equal(page.NoticeText, 'Applied version 2 to pragmatic-system.')
+        assert.deepEqual(page.ApplyRows.ToArray().map(r => [r.VersionText, r.OutcomeText]), [['Version 2', 'Applied']])
+    })
+
+    it("the console's own apply put back (never ready) says so once the console answers again", async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new TypeError('Failed to fetch'))
+        wait.OnWait = n => { if (n === 2) fx.SettleConsoleApply(ConfigurationApplyOutcome.Failed, ConfigurationApplyDetails.RolloutNotReady) }
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(page.NoticeText, 'Version 2 did not become ready on pragmatic-system: the previous configuration is running again.')
+        assert.equal(page.CommandErrorText, '')
+    })
+
+    it('an apply the console answered still pending is waited for by its id; an earlier apply of the same version is not taken for it', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.SettleConsoleApply(ConfigurationApplyOutcome.Applied, null, 'apply-earlier')
+        await page.Refresh()
+        fx.Api.ApplyOutcome = ConfigurationApplyOutcome.Pending
+        wait.OnWait = n => { if (n === 2) fx.SettleConsoleApply(ConfigurationApplyOutcome.Failed, 'superseded', fx.Api.ConfigurationApplies.get(ConfigFixture.Console)![0]!.id) }
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(wait.Waits, 2)
+        assert.equal(page.NoticeText, 'Applying version 2 to pragmatic-system failed: superseded')
+    })
+
+    it('a console that does not answer within five minutes: the page says to reload, without an error', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(504, 'Request failed: 504'))
+        fx.Api.FailOn.set('GetConfigurationComponent', new ApiError(503, 'Request failed: 503'))
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 20 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(wait.Waits, 100)
+        assert.equal(wait.Delays.reduce((a, b) => a + b, 0), 5 * 60 * 1000)
+        assert.equal(page.NoticeText, 'The console did not answer within five minutes: reload this page to see how the apply ended.')
+        assert.equal(page.IsApplying, false)
+    })
+
+    it("another component's 502, or a refusal of the console's own apply, is still an error", async () =>
+    {
+        const fx = new ConfigFixture()
+        const page = await fx.Component()
+        page.SelectedTarget = page.TargetOptions.ToArray()[0]
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(502, 'Request failed: 502'))
+        page.ApplyCommand.Execute()
+        await Tick.Settle()
+        assert.equal(page.CommandErrorText, 'Request failed: 502')
+        assert.equal(page.IsApplying, false)
+        const wait = new InstantWait()
+        const own = await fx.Console(wait)
+        fx.Api.FailOn.set('ApplyConfigurationVersion', new ApiError(409, 'an apply to this target is still being proven'))
+        own.ApplyCommand.Execute()
+        await Tick.Settle()
+        assert.equal(own.CommandErrorText, 'an apply to this target is still being proven')
+        assert.equal(wait.Waits, 0)
     })
 
     it('writes a secret value and keeps only its reference', async () =>

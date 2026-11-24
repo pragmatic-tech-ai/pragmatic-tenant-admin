@@ -105,6 +105,8 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
     private static readonly LogChange = ', change '
     private static readonly LogFailed = ': preparing failed: '
     private static readonly LogUnordered = ': not prepared, the versions do not compare: '
+    private static readonly LogDropped = ': dropped the entries prepared for '
+    private static readonly LogDroppedWhy = " (neither the release's nor what runs there)"
     private static readonly LogAnd = ' and '
     private static readonly Space = ' '
     private static readonly SettingsSeparator = ', '
@@ -155,12 +157,14 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
         return out
     }
 
-    /** Prepares one target again from the file just applied (or put back) there. */
+    /** Prepares one target again from the file just applied (or put back) there. The target is looked up, so what it runs
+     *  is known and entries nobody runs or rolls to go now too; unlisted (or its lookup failing), it is taken as unknown. */
     public async PrepareApplied(applied: AppliedConfiguration, target: ApplyTarget): Promise<PreparationReport | undefined>
     {
         const descriptor = this.descriptors.Current(applied.Component)
         if (descriptor === undefined) return undefined
-        return await this.PrepareOne(applied.Realm, applied.Component, descriptor, new ConfigurationTarget(target.Namespace, target, undefined, undefined))
+        const listed = await this.targets.For(applied.Component, applied.Realm).then(found => found.find(t => t.Target.Equals(target)), () => undefined)
+        return await this.PrepareOne(applied.Realm, applied.Component, descriptor, listed ?? new ConfigurationTarget(target.Namespace, target, undefined, undefined))
     }
 
     /** What is recorded for `component` at each of `targets` for the file applied there now: one row per prepared or
@@ -266,7 +270,11 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
         const existing = entries.get(digest)
         if (status.IsPrepared(digest) && existing !== undefined && existing.Realm === applied.Realm && existing.Component === component && new ConfigurationValidator(descriptor).Validate(existing.Document).Valid)
         {
-            if (obsolete.length > 0) await this.Write(path, base)
+            if (obsolete.length > 0)
+            {
+                await this.Write(path, base)
+                this.LogDroppedEntries(component, target, entries, obsolete)
+            }
             return new PreparationReport(component, target, PreparationResult.Prepared)
         }
         const recorded = status.RefusalFor(digest)
@@ -281,11 +289,13 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
             const refused = AppliedConfigurationEntries.Without(base, [digest])
             refused.metadata.annotations = ConfigurationPreparationStatus.Of(refused.metadata.annotations).WithRefusal(refusal).Over(refused.metadata.annotations)
             await this.Write(path, refused)
+            this.LogDroppedEntries(component, target, entries, obsolete)
             this.Log(component, target, P.LogRefused + descriptor.Version + P.LogChange + settings.join(P.SettingsSeparator))
             return new PreparationReport(component, target, PreparationResult.Refused, settings)
         }
         const saved = await this.SaveFor(scope, source, descriptor, applied)
         await this.Write(path, AppliedConfigurationEntries.With(base, AppliedConfiguration.From(saved, descriptor)))
+        this.LogDroppedEntries(component, target, entries, obsolete)
         this.Log(component, target, P.LogPrepared + descriptor.Version + P.LogAsVersion + String(saved.Number))
         return new PreparationReport(component, target, PreparationResult.Prepared)
     }
@@ -355,6 +365,15 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
     private async Write(path: string, map: IAppliedConfigMap): Promise<void>
     {
         await this.client.Apply(path, map, KubeConfigurationApplier.FieldManager)
+    }
+
+    // One line naming the component versions whose entries a write just dropped (none: no line).
+    private LogDroppedEntries(component: string, target: ConfigurationTarget, entries: ReadonlyMap<string, AppliedConfiguration>, dropped: readonly string[]): void
+    {
+        const P = ConfigurationPreparer
+        if (dropped.length === 0) return
+        const versions = dropped.map(d => entries.get(d)?.ComponentVersion ?? d).sort((a, b) => ComponentVersionOrder.Compare(a, b) ?? a.localeCompare(b))
+        this.Log(component, target, P.LogDropped + versions.join(P.SettingsSeparator) + P.LogDroppedWhy)
     }
 
     private Log(component: string, target: ConfigurationTarget | undefined, text: string): void

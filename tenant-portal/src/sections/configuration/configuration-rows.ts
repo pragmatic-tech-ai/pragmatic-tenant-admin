@@ -62,6 +62,10 @@ export class ConfigurationSettingRowViewModel extends Observable
     private static readonly OptionalLabel = 'Optional'
     private static readonly DefaultPrefix = 'Default '
     private static readonly NoDefault = ''
+    private static readonly RangeSeparator = ', '
+    private static readonly RangeTo = ' to '
+    private static readonly AtLeast = 'at least '
+    private static readonly AtMost = 'at most '
 
     public constructor(private readonly option: ConfigurationOptionDto, private readonly setting: ConfigurationSettingDto)
     {
@@ -73,9 +77,16 @@ export class ConfigurationSettingRowViewModel extends Observable
         return this.option.name + ConfigurationSettingRowViewModel.PathSeparator + this.setting.name
     }
 
+    // The type, and for a bounded integer the range it accepts (`integer, 1000 to 2147483647`, `integer, at most 25000`).
     public get TypeText(): string
     {
-        return this.setting.secret ? ConfigurationSettingRowViewModel.SecretType : this.setting.type
+        const R = ConfigurationSettingRowViewModel
+        if (this.setting.secret) return R.SecretType
+        const { minimum, maximum } = this.setting
+        if (minimum === undefined && maximum === undefined) return this.setting.type
+        const range = minimum !== undefined && maximum !== undefined ? String(minimum) + R.RangeTo + String(maximum)
+            : minimum !== undefined ? R.AtLeast + String(minimum) : R.AtMost + String(maximum)
+        return this.setting.type + R.RangeSeparator + range
     }
 
     public get IsSecret(): boolean
