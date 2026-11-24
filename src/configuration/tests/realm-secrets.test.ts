@@ -166,7 +166,7 @@ describe('secrets in the realm secrets home', () =>
         // Until Task 6 renders the home's settings for environment workloads, the console's own table leaves the env server out.
         assert.equal(RealmCapableComponents.Default.Reads(Scene.Server, '0.1.4'), false)
         assert.equal(RealmCapableComponents.Default.Reads(Scene.Idp, '0.2.8'), true)
-        assert.equal(RealmCapableComponents.Default.Reads(TenantAdminComponent.Name, '0.1.6'), false)
+        assert.equal(RealmCapableComponents.Default.Reads(TenantAdminComponent.Name, '0.1.8'), false)
     })
 
     it('the interim Kubernetes Secret is migrated, the version re-applied and only then deleted', async () =>

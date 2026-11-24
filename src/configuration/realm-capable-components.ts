@@ -15,7 +15,7 @@ export class RealmCapableComponents
 {
     private static readonly IdpName = 'pragmatic-tenant-idp'
     private static readonly IdpFirst = '0.2.8'
-    private static readonly ConsoleFirst = '0.1.7'
+    private static readonly ConsoleFirst = '0.1.9'
 
     /** The engine components the chart gives the realm secrets home. */
     public static readonly Default = new RealmCapableComponents(new Map([
