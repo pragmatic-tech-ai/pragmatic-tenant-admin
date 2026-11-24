@@ -1,5 +1,5 @@
 import type { ComponentDeclaration } from '@pragmatic-tech-ai/pragmatic-component'
-import { ApplyTarget, ComponentStartConfiguration, ConfigurationStartError, RealmSecretsDirectory, type ComponentStartReport, type IStartProcess, type SecretStoreDirectory } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ApplyTarget, ComponentStartConfiguration, ConfigurationStartError, ConfigurationStartReason, RealmSecretsDirectory, type ComponentStartReport, type IStartProcess, type SecretStoreDirectory } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { HttpsKubeTransport, InClusterServiceAccount, KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { K8sManifestBuilder, TenantAdminEnv } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { TenantAdminComponent } from '../tenant-admin-component.js'
@@ -57,10 +57,12 @@ export class ConsoleStartFallback
         catch (error)
         {
             const reason = error instanceof Error ? error.message : String(error)
+            // The realm secrets home not answering is not the configuration's fault: nothing is put back.
+            const homeFailed = error instanceof ConfigurationStartError && error.Reason === ConfigurationStartReason.SecretsHomeUnavailable
             let note = F.NoNote
             try
             {
-                note = revert !== undefined && await revert.Revert() ? F.ReasonSeparator + F.RevertedNote : F.NoNote
+                note = !homeFailed && revert !== undefined && await revert.Revert() ? F.ReasonSeparator + F.RevertedNote : F.NoNote
             }
             catch
             {

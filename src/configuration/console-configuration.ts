@@ -1,4 +1,5 @@
-import { ApplyTarget, SettingValueEncoding, type IConfigurationRepository, type RealmSecretWriter } from '@pragmatic-tech-ai/pragmatic-configuration'
+import type { IRealmSecretStore } from '@pragmatic-tech-ai/pragmatic-realm-adapters'
+import { ApplyTarget, RealmSecretWriter, SettingValueEncoding, type IConfigurationRepository } from '@pragmatic-tech-ai/pragmatic-configuration'
 import type { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { OciRegistryClient, ReleaseApp, ReleaseComponentDescriptors, ReleaseRegistry, ReleaseTrustKeys } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import { ConfigurationService, K8sManifestBuilder, UnavailableComponentSecretWriter, UnavailableConfigurationApplier, type ConfigurationTarget, type EnvironmentRecord, type IConfigurationTargetSource } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
@@ -121,9 +122,9 @@ export interface ConsoleConfigurationParts
     HiveId: string
     /** The console's Kubernetes access; undefined outside a cluster (nothing can be applied). */
     Client: KubeApiClient | undefined
-    /** The realm secrets home's writer when the hive has one (2.5): secrets a tenant admin enters go there, and the
-     *  interim Kubernetes Secrets move there at start. Undefined: the interim `file` store, as before. */
-    RealmSecrets?: RealmSecretWriter
+    /** The realm secrets home when the hive has one (2.5), opened and verified: secrets a tenant admin enters go there,
+     *  and the interim Kubernetes Secrets move there at start. Undefined: the interim `file` store, as before. */
+    RealmSecrets?: IRealmSecretStore
 }
 
 /**
@@ -168,9 +169,10 @@ export class ConsoleConfiguration
         const preparer = new ConfigurationPreparer(parts.Client, parts.Repository, catalogue, targets, lock, log)
         const self = C.SelfOf(parts.Client, parts.TenantId, parts.HiveId)
         const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, self, lock, preparer)
-        const secrets = parts.RealmSecrets === undefined ? new ComponentSecretWriter(parts.Client) : new RealmComponentSecretWriter(parts.RealmSecrets)
+        const interim = new ComponentSecretWriter(parts.Client)
+        const secrets = parts.RealmSecrets === undefined ? interim : new RealmComponentSecretWriter(new RealmSecretWriter(parts.RealmSecrets), interim, targets, parts.TenantId)
         const service = new ConfigurationService(parts.Repository, catalogue, targets, applier, secrets, preparer)
-        const migration = parts.RealmSecrets === undefined ? undefined : new InterimSecretMigration(service, parts.Client, parts.RealmSecrets)
+        const migration = parts.RealmSecrets === undefined ? undefined : new InterimSecretMigration(service, parts.Client, parts.RealmSecrets, self)
         return new ComposedConsoleConfiguration(service, preparer, self, migration)
     }
 

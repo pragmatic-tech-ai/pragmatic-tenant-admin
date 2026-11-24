@@ -16,7 +16,7 @@ import { UnconfiguredRolloutClient } from './tenant-api/unconfigured-rollout-cli
 import { HttpRolloutClient } from './tenant-api/http-rollout-client.js'
 import { ConsoleConfiguration } from './configuration/console-configuration.js'
 import { TenantAdminComponent } from './tenant-admin-component.js'
-import { RealmSecretWriter, RealmSecretsDirectory, SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { RealmSecretsDirectory, SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { ConsoleStartFallback } from './configuration/console-start-fallback.js'
 import type { ConfigurationPreparer } from './configuration/configuration-preparer.js'
 import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
@@ -401,7 +401,7 @@ export class TenantAdminServer
         // their configurations for the descriptors of the release it runs (ConfigurationPreparer).
         // With a realm secrets home (2.5) the console writes the secrets tenant admins enter there; opening it checks the
         // home first (the custom home's key check), so a replaced realm master key refuses the console's start.
-        const realmSecrets = RealmSecretsDirectory.Configured(env) ? await RealmSecretWriter.FromEnvironment(TenantAdminComponent.Name, env) : undefined
+        const realmSecrets = await RealmSecretsDirectory.RealmStoreFor(TenantAdminComponent.Name, env)
         const configuration = ConsoleConfiguration.Build({
             Env: env, Repository: await db.Configuration(), Environments: registry, TenantId: tenant.id,
             HiveId: TenantAdminServer.FirstHiveOf(directory).id, Client: inCluster?.client, RealmSecrets: realmSecrets,
