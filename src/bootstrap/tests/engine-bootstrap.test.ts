@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { KubeMethod, type IKubeTransport, type KubeContentType, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
+import { KubeContentType, KubeMethod, type IKubeTransport, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
 import { BootstrapCli, type IBootstrapOutput } from '../bootstrap-cli.js'
 import { BootstrapSettings } from '../bootstrap-settings.js'
 import { EngineBootstrap, type IRandomSource } from '../engine-bootstrap.js'
 import { EngineSecretOrigin, EngineSecretScope, EngineSecretSet } from '../engine-secret-set.js'
-import type { ITlsMinter, TlsMaterial } from '../tls-minter.js'
+import type { ITlsMinter, LeafMaterial, TlsMaterial } from '../tls-minter.js'
 import { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 
 type Obj = { metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> }; type?: string; data?: Record<string, string> }
@@ -35,6 +35,17 @@ class MemoryCluster implements IKubeTransport
             this.Writes.push('create ' + at)
             this.Objects.set(at, object)
             return { status: 201, body: '{}' }
+        }
+        if (_type === KubeContentType.MergePatch)
+        {
+            const current = this.Objects.get(bare)
+            if (current === undefined)
+            {
+                return { status: 404, body: '{}' }
+            }
+            this.Writes.push('patch ' + bare)
+            current.metadata.labels = { ...(current.metadata.labels ?? {}), ...(object.metadata.labels ?? {}) }
+            return { status: 200, body: '{}' }
         }
         this.Writes.push('apply ' + bare)
         this.Objects.set(bare, object)
@@ -74,7 +85,13 @@ class RecordingMinter implements ITlsMinter
     {
         this.Minted.push([...hosts])
         const n = this.Minted.length
-        return { Ca: Buffer.from('ca-' + n), Cert: Buffer.from('cert-' + n), Key: Buffer.from('key-' + n) }
+        return { Ca: Buffer.from('ca-' + n), Cert: Buffer.from('cert-' + n), Key: Buffer.from('key-' + n), CaKey: Buffer.from('ca-key-' + n) }
+    }
+
+    public MintLeaf(hosts: readonly string[]): LeafMaterial
+    {
+        this.Minted.push([...hosts])
+        return { Cert: Buffer.from('leaf-' + this.Minted.length), Key: Buffer.from('leaf-key-' + this.Minted.length) }
     }
 }
 
@@ -241,7 +258,31 @@ describe('EngineBootstrap', () =>
         assert.ok(report.Created.includes('pragmatic-system/' + EngineSecretSet.ConsoleTls))
         assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.DevCa), 'ca.crt'), 'ca-1')
         assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.ConsoleTls), 'tls.crt'), 'cert-1')
+        assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.Namespace, EngineSecretSet.DevCaKey), 'ca.key'), 'ca-key-1', 'the CA key is kept beside it (C3.4 renewal)')
+        assert.equal(cluster.Secret(BootstrapFixture.IdpNamespace, EngineSecretSet.DevCaKey), undefined, 'the CA key is never copied out')
         assert.equal(BootstrapFixture.Decoded(cluster.Secret(BootstrapFixture.IdpNamespace, EngineSecretSet.ConsoleTls), 'tls.crt'), 'cert-1', 'the copy follows')
+    })
+
+    it('labels both engine namespaces Pod Security restricted, once: the helm-made one is patched, the IdP one created labelled', async () =>
+    {
+        const cluster = new MemoryCluster()
+        const ns = '/api/v1/namespaces/'
+        cluster.Objects.set(ns + BootstrapFixture.Namespace, { metadata: { name: BootstrapFixture.Namespace, labels: { 'kubernetes.io/metadata.name': BootstrapFixture.Namespace } } })
+        const bootstrap = (): EngineBootstrap => new EngineBootstrap(new KubeApiClient(cluster), BootstrapSettings.From(BootstrapFixture.Env()), new RecordingMinter(), new CountingRandom(), () => new Date('2026-11-24T00:00:00Z'))
+        const first = await bootstrap().RunNamespace()
+        assert.deepEqual(first.Created, [BootstrapFixture.IdpNamespace])
+        assert.deepEqual(first.Refreshed, [BootstrapFixture.Namespace], 'only the helm-made namespace needed a patch')
+        for (const name of [BootstrapFixture.Namespace, BootstrapFixture.IdpNamespace])
+        {
+            assert.equal(cluster.Objects.get(ns + name)?.metadata.labels?.[EngineBootstrap.PodSecurityEnforceLabel], 'restricted', name)
+        }
+        assert.equal(cluster.Objects.get(ns + BootstrapFixture.Namespace)?.metadata.labels?.['kubernetes.io/metadata.name'], BootstrapFixture.Namespace, 'other labels stay')
+        cluster.Writes.splice(0)
+        const again = await bootstrap().RunNamespace()
+        assert.deepEqual(again.Refreshed, [])
+        assert.deepEqual(cluster.Writes, [], 'nothing is written when the labels are right')
+        cluster.Objects.get(ns + BootstrapFixture.IdpNamespace)!.metadata.labels![EngineBootstrap.PodSecurityEnforceLabel] = 'privileged'
+        assert.deepEqual((await bootstrap().RunNamespace()).Refreshed, [BootstrapFixture.IdpNamespace], 'a weaker label is put back')
     })
 
     it('a standalone engine gets no hive agent configuration objects', async () =>

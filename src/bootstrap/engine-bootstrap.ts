@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
-import { KubeResourceCatalog, type KubeApiClient, type KubeTypeRef } from '@pragmatic-tech-ai/pragmatic-kube'
+import { KubeContentType, KubeResourceCatalog, type KubeApiClient, type KubeTypeRef } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ComponentConfigurationMounts, ConsoleFingerprintKeys, EnvironmentHiveDatabase, HiveBackend, InfraMode, K8sManifestBuilder, TenantOwner, type TenantDirectorySeed } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { ReleaseApp } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
 import type { BootstrapSettings } from './bootstrap-settings.js'
@@ -73,6 +73,18 @@ export class EngineBootstrap
     private static readonly DataKey = 'data'
     private static readonly SecretKind = 'Secret'
     private static readonly NamespaceKind = 'Namespace'
+    /** Pod Security admission (Kubernetes ≥ 1.25): the level every pod of an engine namespace must meet. */
+    public static readonly PodSecurityEnforceLabel = 'pod-security.kubernetes.io/enforce'
+    public static readonly PodSecurityLevel = 'restricted'
+    public static readonly PodSecurityVersionLabel = 'pod-security.kubernetes.io/enforce-version'
+    public static readonly PodSecurityVersion = 'latest'
+
+    /** The engine namespaces' Pod Security labels (environments get `baseline` from the tenant plane, likewise at `latest`). */
+    public static PodSecurityLabels(): Record<string, string>
+    {
+        const B = EngineBootstrap
+        return { [B.PodSecurityEnforceLabel]: B.PodSecurityLevel, [B.PodSecurityVersionLabel]: B.PodSecurityVersion }
+    }
     private static readonly MissingSourcePrefix = 'the bootstrap cannot copy a Secret whose source is absent: '
     private static readonly UnknownSecretPrefix = 'the bootstrap has no material for the Secret '
     private static readonly OtherEnginePrefix = 'this cluster already holds the engine of '
@@ -98,12 +110,44 @@ export class EngineBootstrap
 
     /**
      * The first hook step (`bootstrap namespace`): the realm sign-in service's namespace, created when absent, so the
-     * chart's namespaced bootstrap Roles can be bound in it before the Secrets are minted.
+     * chart's namespaced bootstrap Roles can be bound in it before the Secrets are minted. Both engine namespaces then
+     * carry the Pod Security `restricted` enforce label (every engine workload runs restricted-compliant: non-root,
+     * no privilege escalation, every capability dropped, RuntimeDefault seccomp, no host paths); `pragmatic-system`,
+     * which `helm --create-namespace` created unlabelled, is labelled here, and a label already right is left alone.
      */
     public async RunNamespace(): Promise<EngineBootstrapReport>
     {
-        const created = await this.EnsureNamespace(this.settings.IdpNamespace)
-        return { Created: created ? [this.settings.IdpNamespace] : [], Kept: created ? [] : [this.settings.IdpNamespace], Refreshed: [] }
+        const s = this.settings
+        const created = await this.EnsureNamespace(s.IdpNamespace)
+        const refreshed: string[] = []
+        for (const namespace of [s.Namespace, s.IdpNamespace])
+        {
+            if (await this.EnsurePodSecurity(namespace))
+            {
+                refreshed.push(namespace)
+            }
+        }
+        return { Created: created ? [s.IdpNamespace] : [], Kept: created ? [] : [s.IdpNamespace], Refreshed: refreshed }
+    }
+
+    /** The namespace's Pod Security enforce label set to `restricted` when it is not; true when it was changed. */
+    private async EnsurePodSecurity(name: string): Promise<boolean>
+    {
+        const B = EngineBootstrap
+        const path = KubeResourceCatalog.PathOf(B.NamespaceType, undefined, name)
+        const found = await this.kube.Get(path) as { metadata?: { labels?: Record<string, string> } } | undefined
+        if (found === undefined)
+        {
+            // helm creates the release namespace before any hook runs; one that is absent is not this step's to make.
+            return false
+        }
+        const labels = found.metadata?.labels ?? {}
+        if (labels[B.PodSecurityEnforceLabel] === B.PodSecurityLevel && labels[B.PodSecurityVersionLabel] === B.PodSecurityVersion)
+        {
+            return false
+        }
+        await this.kube.Patch(path, { [B.MetadataKey]: { [B.LabelsKey]: B.PodSecurityLabels() } }, KubeContentType.MergePatch)
+        return true
     }
 
     public async Run(): Promise<EngineBootstrapReport>
@@ -202,6 +246,9 @@ export class EngineBootstrap
         }
         const material = this.tls.Mint([s.ConsoleHost, s.IdpHost, B.WildcardPrefix + s.BaseDomain])
         const caSpec: EngineSecretSpec = { Name: S.DevCa, Scope: EngineSecretScope.Engine, Keys: [S.CaKey], Type: S.OpaqueType, Origin: EngineSecretOrigin.Minted }
+        const caKeySpec: EngineSecretSpec = { Name: S.DevCaKey, Scope: EngineSecretScope.Engine, Keys: [S.CaKeyKey], Type: S.OpaqueType, Origin: EngineSecretOrigin.Minted }
+        // The key first: a CA Secret never names an issuer whose key was lost.
+        await this.Apply(namespace, caKeySpec, { [S.CaKeyKey]: material.CaKey })
         await this.Apply(namespace, caSpec, { [S.CaKey]: material.Ca })
         await this.Apply(namespace, spec, { [S.TlsCertKey]: material.Cert, [S.TlsKeyKey]: material.Key })
         return true
@@ -322,7 +369,7 @@ export class EngineBootstrap
         return await this.kube.Create(KubeResourceCatalog.PathOf(B.NamespaceType, undefined), {
             [B.ApiVersionKey]: B.NamespaceType.apiVersion,
             [B.KindKey]: B.NamespaceKind,
-            [B.MetadataKey]: { [B.NameKey]: name, [B.LabelsKey]: this.Labels(), [B.AnnotationsKey]: EngineBootstrap.KeepAnnotations() },
+            [B.MetadataKey]: { [B.NameKey]: name, [B.LabelsKey]: { ...this.Labels(), ...B.PodSecurityLabels() }, [B.AnnotationsKey]: EngineBootstrap.KeepAnnotations() },
         })
     }
 

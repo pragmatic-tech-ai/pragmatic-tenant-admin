@@ -18,6 +18,12 @@ export interface EnvironmentIntentApplierOptions
     Service: Pick<IEnvironmentService, 'Create' | 'Delete' | 'Restart' | 'List'>
     /** The hive the console places environments on (its one hive). */
     HiveId: () => string
+    /**
+     * Who an intent's environment is created for: the tenant's Owner principal, seeded as its administrator as the
+     * console's own create seeds the signed-in creator (a Delegated intent has no approver; an Enrolled one's approver
+     * is a realm subject the environment does not know yet).
+     */
+    Creator: () => string
     /** The engine's release version (the chart's), or undefined when the chart names none. */
     EngineVersion: string | undefined
     /** Which environment each create intent created (intent id → environment name), so a retried intent is not a clash. */
@@ -36,6 +42,8 @@ export interface EnvironmentIntentApplierOptions
 export class EnvironmentIntentApplier
 {
     private created: Map<string, string> | undefined
+    /** The create each intent id is applying now: a retry while it runs answers with the same outcome. */
+    private readonly inFlight = new Map<string, Promise<ConsoleIntentOutcome>>()
 
     public constructor(private readonly options: EnvironmentIntentApplierOptions)
     {
@@ -67,7 +75,24 @@ export class EnvironmentIntentApplier
         return purpose === EnvironmentPurpose.Runtime ? Template.RuntimePostgres : Template.DevBlank
     }
 
-    private async Create(intentId: string, action: CreateEnvironment): Promise<ConsoleIntentOutcome>
+    private Create(intentId: string, action: CreateEnvironment): Promise<ConsoleIntentOutcome>
+    {
+        const running = this.inFlight.get(intentId)
+        if (running !== undefined)
+        {
+            return running
+        }
+        const started = this.CreateOnce(intentId, action).finally(() => this.inFlight.delete(intentId))
+        this.inFlight.set(intentId, started)
+        return started
+    }
+
+    /**
+     * The intent's id is noted before the create, so a console that stops mid-create finds the environment its own on
+     * the agent's retry (and creates it again if nothing was registered); it is removed when the name turned out to be
+     * taken, so a later retry never reports someone else's environment as this intent's.
+     */
+    private async CreateOnce(intentId: string, action: CreateEnvironment): Promise<ConsoleIntentOutcome>
     {
         if (action.Version !== null && action.Version !== this.options.EngineVersion)
         {
@@ -83,16 +108,20 @@ export class EnvironmentIntentApplier
         {
             return ConsoleIntentOutcome.FailedWith(IntentFailure.EnvironmentExists)
         }
-        // Noted first: a console that stops mid-create finds the environment its own on the agent's retry.
         await this.Note(intentId, action.Environment)
         const template = EnvironmentIntentApplier.TemplateOf(action.Purpose)
         try
         {
-            return EnvironmentIntentApplier.OutcomeOf(await this.options.Service.Create(action.Environment, template, TemplateCatalog.DefaultTypeFor(template), undefined, this.options.HiveId()))
+            return EnvironmentIntentApplier.OutcomeOf(await this.options.Service.Create(action.Environment, template, TemplateCatalog.DefaultTypeFor(template), undefined, this.options.HiveId(), this.options.Creator()))
         }
         catch (error)
         {
-            return ConsoleIntentOutcome.FailedWith(error instanceof EnvironmentExistsError ? IntentFailure.EnvironmentExists : IntentFailure.ApplyFailed)
+            if (error instanceof EnvironmentExistsError)
+            {
+                await this.Forget(intentId)
+                return ConsoleIntentOutcome.FailedWith(IntentFailure.EnvironmentExists)
+            }
+            return ConsoleIntentOutcome.FailedWith(IntentFailure.ApplyFailed)
         }
     }
 
@@ -179,6 +208,13 @@ export class EnvironmentIntentApplier
     {
         const created = await this.Created()
         created.set(intentId, environment)
+        await this.options.Created.Save(created, new Set([intentId]))
+    }
+
+    private async Forget(intentId: string): Promise<void>
+    {
+        const created = await this.Created()
+        created.delete(intentId)
         await this.options.Created.Save(created, new Set([intentId]))
     }
 

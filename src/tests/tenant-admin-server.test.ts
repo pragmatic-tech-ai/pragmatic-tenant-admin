@@ -8,6 +8,7 @@ import { Readable } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeOidcIdp, TlsTestRealm, type TlsTestRealmRoute } from '@pragmatic-tech-ai/pragmatic-identity-source-oidc/testing'
+import { ConsoleIntentLink } from '@pragmatic-tech-ai/pragmatic-hive-protocol'
 import { InjectedIdpService } from '../injected-idp-service.js'
 import { UnconfiguredIdpService } from '../unconfigured-idp-service.js'
 import { TenantAdminServer, type TenantAdminComposition } from '../tenant-admin-server.js'
@@ -576,6 +577,30 @@ describe('TenantAdminServer', () =>
         finally
         {
             held.Release()
+            await composition.host.Close()
+        }
+    })
+
+    it('a connected engine serves its intent endpoint on its own listener; the public listener has no route for its path', async () =>
+    {
+        const saRoot = writePod()
+        const podEnv = { ...env(), [Names.ServiceHostVar]: Names.ServiceHost, PRAGMATIC_ENGINE_MODE: 'connected', PRAGMATIC_ENGINE_AGENT_SERVICE_ACCOUNT: 'system:serviceaccount:pragmatic-system:pragmatic-hive-h1-agent' }
+        const composition = await new TenantAdminServer(TenantAdminServer.ReadConfig(env()), new FakeRolloutClient()).Compose(podEnv, saRoot, () => undefined, db)
+        const intents = composition.intents
+        assert.ok(intents !== undefined, 'the endpoint is composed')
+        await composition.host.Listen(0, Names.DefaultBind)
+        await intents.Listen(0, Names.DefaultBind)
+        try
+        {
+            const publicReply = await fetch('http://' + Names.DefaultBind + ':' + String(composition.host.Address().port) + ConsoleIntentLink.Path, { method: 'POST', body: '{}' })
+            assert.notEqual(publicReply.status, 200, 'the public listener never applies an intent')
+            assert.equal(composition.host.Routes().Match('POST', ConsoleIntentLink.Path).Route, undefined, 'the public listener has no intent route (an unknown POST is refused before routing)')
+            const internalReply = await fetch('http://' + Names.DefaultBind + ':' + String(intents.Address().port) + ConsoleIntentLink.Path, { method: 'POST', body: '{}' })
+            assert.equal(internalReply.status, 403, 'the internal listener refuses a caller that is not the agent')
+        }
+        finally
+        {
+            await intents.Close()
             await composition.host.Close()
         }
     })

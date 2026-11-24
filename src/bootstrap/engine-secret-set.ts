@@ -61,6 +61,13 @@ export class EngineSecretSet
     public static readonly IdpCa = 'pragmatic-tenant-idp-ca'
     public static readonly IdpDatabase = 'pragmatic-tenant-idp-database'
     public static readonly DevCa = 'pragmatic-tls-dev-ca'
+    /**
+     * The development CA's key (C3.4): kept in pragmatic-system only, never copied or mounted, so the console renews its
+     * certificate under the same CA (ConsoleCertificateRenewal). Written with the CA by the bootstrap; not in Specs (no
+     * template mounts it).
+     */
+    public static readonly DevCaKey = 'pragmatic-tls-dev-ca-key'
+    public static readonly CaKeyKey = 'ca.key'
     public static readonly ConsoleTls = 'pragmatic-console-tls'
     public static readonly OwnerInitial = 'pragmatic-owner-initial'
     /** The custom realm secrets home (2.5): the realm master key (copied into the sign-in service's namespace) and its three roles. */

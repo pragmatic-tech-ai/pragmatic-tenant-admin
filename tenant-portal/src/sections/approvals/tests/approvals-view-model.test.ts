@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { ApiError } from '../../../tenant-api-client.js'
 import type { KeptIntentDto } from '../../../tenant-types.js'
 import { FakeTenantApi, TenantTestHost } from '../../../shell/tests/tenant-test-fixtures.js'
-import { ApprovalRowViewModel, ApprovalsViewModel, DecisionRefusal, IntentProgressDto } from '../approvals-view-model.js'
+import { ApprovalRowViewModel, ApprovalsViewModel, DecisionRefusal, IntentProgressDto, type IExpiryTimer } from '../approvals-view-model.js'
 import { ApprovalsSectionService } from '../approvals-section-service.js'
 import { IntentSentences } from '../intent-sentences.js'
 
@@ -68,7 +68,7 @@ describe('ApprovalsViewModel', () =>
         assert.equal(page.IsPopulated, true)
         const rows = page.Rows.ToArray()
         assert.deepEqual(rows.map(row => row.IsPending), [true, false, false, false, false])
-        assert.deepEqual(rows.map(row => row.StatusText), ['Waiting for approval', 'Expired', 'Expired', 'Applied', 'Failed: environment-exists'])
+        assert.deepEqual(rows.map(row => row.StatusText), ['Waiting for approval', 'Expired', 'Expired', 'Applied', 'Failed: an environment of that name exists already'])
         assert.match(rows[1]!.ExpiryText, /^Expired 2026-11-25 00:00 UTC$/)
         assert.match(rows[0]!.ExpiryText, /^Expires 2026-12-01 00:00 UTC$/)
         assert.equal(rows[1]!.ApproveCommand.CanExecute(), false)
@@ -126,5 +126,57 @@ describe('ApprovalsViewModel', () =>
         api.Intents = [ApprovalSamples.Create()]
         await section.CountPending(ApprovalSamples.Now)
         assert.equal(section.PendingText, '1 change to approve')
+    })
+})
+
+class ManualExpiryTimer implements IExpiryTimer
+{
+    public DelayMs: number | undefined
+    public Tick: (() => void) | undefined
+
+    public Start(delayMs: number, tick: () => void): void
+    {
+        this.DelayMs = delayMs
+        this.Tick = tick
+    }
+
+    public Stop(): void
+    {
+        this.DelayMs = undefined
+        this.Tick = undefined
+    }
+}
+
+describe('ApprovalsViewModel expiry', () =>
+{
+    it('a row that expires while shown stops offering Approve, and deciding it asks nothing', async () =>
+    {
+        const api = new FakeTenantApi()
+        api.Intents = [ApprovalSamples.Intent('inaaaaaaaaaaaa', { Kind: 'delete-environment', Environment: 'old' }, IntentProgressDto.AwaitingApproval, '2026-11-25T13:00:00.000Z')]
+        let now = ApprovalSamples.Now
+        const timer = new ManualExpiryTimer()
+        const counts: number[] = []
+        const page = new ApprovalsViewModel(new TenantTestHost(api).Session, count => counts.push(count), () => now, timer)
+        await page.Refresh()
+        const row = page.Rows.ToArray()[0]!
+        assert.equal(row.ApproveCommand.CanExecute(), true)
+        assert.equal(timer.DelayMs, 3_600_000 + 1000, 'the re-check waits for the expiry')
+        now = new Date('2026-11-25T13:00:01.000Z')
+        timer.Tick?.()
+        assert.equal(row.ApproveCommand.CanExecute(), false)
+        assert.equal(row.StatusText, 'Expired')
+        assert.equal(page.PendingCount, 0)
+        assert.equal(counts.at(-1), 0)
+        assert.equal(timer.Tick, undefined, 'nothing left to wait for')
+        await row.Decide(true)
+        assert.deepEqual(api.Decided, [], 'an expired row asks nothing')
+    })
+
+    it('a failure code reads in plain words', () =>
+    {
+        const row = new ApprovalRowViewModel(new TenantTestHost(new FakeTenantApi()).Session, { ...ApprovalSamples.Create(), Progress: 'failed', Failure: 'not-ready' }, () => ApprovalSamples.Now, () => undefined)
+        assert.equal(row.StatusText, 'Failed: it was applied but never became ready; the previous state was kept')
+        const unknown = new ApprovalRowViewModel(new TenantTestHost(new FakeTenantApi()).Session, { ...ApprovalSamples.Create(), Progress: 'failed', Failure: 'something-new' }, () => ApprovalSamples.Now, () => undefined)
+        assert.equal(unknown.StatusText, 'Failed: for a reason this console does not know')
     })
 })

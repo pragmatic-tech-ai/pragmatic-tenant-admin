@@ -9,6 +9,51 @@ export interface IAgentCallers
     IsAgent(authorization: string | undefined): Promise<boolean>
 }
 
+/**
+ * How many caller checks (TokenReviews) one request source may cause per minute: the agent sends a handful, so a
+ * source past the budget is answered 503 `unavailable` without a review, and the API server is never flooded.
+ */
+export class CallerReviewBudget
+{
+    public static readonly PerMinute = 60
+    private static readonly WindowMs = 60_000
+    private readonly windows = new Map<string, { Start: number, Count: number }>()
+
+    public constructor(private readonly perMinute: number = CallerReviewBudget.PerMinute, private readonly now: () => number = () => Date.now())
+    {
+    }
+
+    /** Whether `source` may have one more review now (counted when it may). */
+    public Take(source: string): boolean
+    {
+        const at = this.now()
+        const window = this.windows.get(source)
+        if (window === undefined || at - window.Start >= CallerReviewBudget.WindowMs)
+        {
+            this.Sweep(at)
+            this.windows.set(source, { Start: at, Count: 1 })
+            return true
+        }
+        if (window.Count >= this.perMinute)
+        {
+            return false
+        }
+        window.Count += 1
+        return true
+    }
+
+    private Sweep(at: number): void
+    {
+        for (const [source, window] of this.windows)
+        {
+            if (at - window.Start >= CallerReviewBudget.WindowMs)
+            {
+                this.windows.delete(source)
+            }
+        }
+    }
+}
+
 /** What the endpoint logs: event names and codes only, never a token or a body. */
 export interface IEnvironmentIntentLog
 {
@@ -36,9 +81,11 @@ export class EnvironmentIntentEndpoint
     private static readonly Utf8 = 'utf8'
     private static readonly NotFoundBody = { error: 'not-found' }
     private static readonly MethodBody = { error: 'method-not-allowed' }
-    private static readonly TooLargeBody = { error: 'too-large' }
+    private static readonly UnknownSource = 'unknown'
     private static readonly AppliedEvent = 'intent-outcome'
     private static readonly CallerRefusedEvent = 'intent-caller-refused'
+    private static readonly BudgetEvent = 'intent-caller-over-budget'
+    private static readonly TooLargeEvent = 'intent-too-large'
     private static readonly MalformedEvent = 'intent-malformed'
     private static readonly FailedEvent = 'intent-endpoint-failed'
     private static readonly ErrorEvent = 'error'
@@ -48,7 +95,7 @@ export class EnvironmentIntentEndpoint
 
     private server: Server | undefined
 
-    public constructor(private readonly applier: EnvironmentIntentApplier, private readonly callers: IAgentCallers, private readonly log: IEnvironmentIntentLog)
+    public constructor(private readonly applier: EnvironmentIntentApplier, private readonly callers: IAgentCallers, private readonly log: IEnvironmentIntentLog, private readonly budget: CallerReviewBudget = new CallerReviewBudget())
     {
     }
 
@@ -58,7 +105,8 @@ export class EnvironmentIntentEndpoint
         {
             void this.Serve(req, res)
         })
-        // Creating an environment takes minutes: the agent waits up to ConsoleIntentLink.TimeoutMs.
+        // Node ends a request that is not answered within requestTimeout (5 minutes by default); creating an environment can
+        // take longer, so the server allows as long as the agent waits for an answer (ConsoleIntentLink.TimeoutMs).
         server.requestTimeout = ConsoleIntentLink.TimeoutMs
         return new Promise((resolve, reject) =>
         {
@@ -107,6 +155,13 @@ export class EnvironmentIntentEndpoint
                 E.Write(res, E.StatusMethodNotAllowed, E.MethodBody)
                 return
             }
+            if (!this.budget.Take(req.socket.remoteAddress ?? E.UnknownSource))
+            {
+                req.resume()
+                this.log.Event(E.BudgetEvent)
+                E.Refuse(res, ConsoleIntentRefusal.Unavailable)
+                return
+            }
             if (!await this.callers.IsAgent(req.headers.authorization))
             {
                 req.resume()
@@ -117,7 +172,8 @@ export class EnvironmentIntentEndpoint
             const text = await E.ReadBody(req)
             if (text === undefined)
             {
-                E.Write(res, E.StatusTooLarge, E.TooLargeBody)
+                this.log.Event(E.TooLargeEvent)
+                E.Write(res, E.StatusTooLarge, ConsoleIntentLink.RefusalBody(ConsoleIntentRefusal.Malformed))
                 return
             }
             let call: ConsoleIntentCall

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
 import { describe, it } from 'node:test'
+import type { AddressInfo } from 'node:net'
+import { connect, createServer } from 'node:tls'
 import { OpenSslTlsMinter } from '../tls-minter.js'
 
 class MinterFixture
@@ -37,6 +39,40 @@ describe('OpenSslTlsMinter', () =>
         assert.equal(cert.checkHost('env-1.acme.example'), '*.acme.example', 'every environment of the base domain')
         assert.equal(cert.checkHost('other.example'), undefined)
         assert.match(material.Key.toString('utf8'), /-----BEGIN PRIVATE KEY-----/)
+    })
+
+    it('renews the server certificate under the same CA: a client created before the rotation, trusting only the old CA, still connects', { skip: process.platform === 'win32' || !MinterFixture.HasOpenssl() }, async () =>
+    {
+        const hosts = ['console.acme.example', 'idp-acme.acme.example', '*.acme.example']
+        const minter = new OpenSslTlsMinter()
+        const first = minter.Mint(hosts)
+        const leaf = minter.MintLeaf(hosts, first.Ca, first.CaKey)
+        const ca = new X509Certificate(first.Ca)
+        const renewed = new X509Certificate(leaf.Cert)
+        assert.ok(renewed.verify(ca.publicKey), 'the existing CA signed the renewed certificate')
+        assert.notEqual(renewed.serialNumber, new X509Certificate(first.Cert).serialNumber)
+        assert.equal(renewed.checkHost('journey.acme.example'), '*.acme.example')
+        // The environment's view: it was given the CA at its creation and reaches the sign-in service by name.
+        const server = createServer({ cert: leaf.Cert, key: leaf.Key }, socket => socket.end())
+        await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+        try
+        {
+            const port = (server.address() as AddressInfo).port
+            const authorized = await new Promise<boolean>((resolve, reject) =>
+            {
+                const socket = connect({ host: '127.0.0.1', port, servername: 'idp-acme.acme.example', ca: first.Ca }, () =>
+                {
+                    resolve(socket.authorized)
+                    socket.destroy()
+                })
+                socket.on('error', reject)
+            })
+            assert.equal(authorized, true)
+        }
+        finally
+        {
+            await new Promise<void>(resolve => server.close(() => resolve()))
+        }
     })
 
     it('refuses a host a certificate cannot carry', () =>

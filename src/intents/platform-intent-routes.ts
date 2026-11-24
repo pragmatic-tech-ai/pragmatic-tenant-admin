@@ -1,6 +1,6 @@
 import { HttpMethod, HttpProblem, RouteAuth, type RequestContext, type RouteTable } from '@pragmatic-tech-ai/pragmatic-app-host'
 import {
-    IntentChoice, IntentDecisionCall, IntentDecisionRefusal, IntentInternalLink, ProtocolDecodeError, ProtocolNames, RealmSubject,
+    IntentChoice, IntentDecisionCall, IntentDecisionRefusal, IntentInternalLink, ProtocolDecodeError, ProtocolNames, RealmSubject, type KeptIntentView,
 } from '@pragmatic-tech-ai/pragmatic-hive-protocol'
 import { TenantRoles, TenantSessionClaims, type TenantSession } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { HiveIntentsClientError, type IHiveIntentsAgent } from './hive-intents-client.js'
@@ -67,7 +67,33 @@ export class PlatformIntentRoutes
             throw error
         }
         ctx.NoteAudit(choice)
-        ctx.WriteJson(P.StatusOk, (await this.agent.Decide(intentId, call)).ToJson())
+        ctx.WriteJson(P.StatusOk, (await this.DecideOrCurrent(intentId, call)).ToJson())
+    }
+
+    /**
+     * The decision, or (when the agent could not answer in time: it may be busy applying, and records the decision
+     * later) the intent as the agent keeps it now, so the admin sees where it stands instead of a failure; a refusal of
+     * the decision itself passes through.
+     */
+    private async DecideOrCurrent(intentId: string, call: IntentDecisionCall): Promise<KeptIntentView>
+    {
+        try
+        {
+            return await this.agent.Decide(intentId, call)
+        }
+        catch (error)
+        {
+            if (!(error instanceof HiveIntentsClientError) || error.Code !== IntentDecisionRefusal.Unavailable)
+            {
+                throw error
+            }
+            const current = (await this.agent.List()).Intents.find(intent => intent.IntentId === intentId)
+            if (current === undefined)
+            {
+                throw error
+            }
+            return current
+        }
     }
 
     /** Runs a route for a live session of the tenant; the agent's refusals are answered with their codes. */

@@ -31,6 +31,53 @@ export enum DecisionRefusal
     Unavailable = 'unavailable',
 }
 
+// Why an intent failed, as the hive reports it (the hive protocol's IntentFailure).
+export enum IntentFailureDto
+{
+    PrecheckRefused = 'precheck-refused',
+    EnvironmentNotFound = 'environment-not-found',
+    EnvironmentExists = 'environment-exists',
+    VersionUnavailable = 'version-unavailable',
+    NotReady = 'not-ready',
+    ConsoleUnavailable = 'console-unavailable',
+    RotationRefused = 'rotation-refused',
+    RecheckFailed = 'recheck-failed',
+    ApplyFailed = 'apply-failed',
+}
+
+// Starts and stops the expiry re-check (setTimeout in the browser; a manual one in tests).
+export interface IExpiryTimer
+{
+    Start(delayMs: number, tick: () => void): void
+    Stop(): void
+}
+
+export class TimeoutExpiryTimer implements IExpiryTimer
+{
+    private handle: ReturnType<typeof setTimeout> | undefined
+
+    // At most a day at a time (a longer timeout overflows and fires at once); a later tick schedules the next.
+    private static readonly MaxDelayMs = 86_400_000
+
+    public Start(delayMs: number, tick: () => void): void
+    {
+        this.Stop()
+        const handle = setTimeout(tick, Math.min(delayMs, TimeoutExpiryTimer.MaxDelayMs)) as ReturnType<typeof setTimeout> & { unref?: () => void }
+        // In node (tests) the re-check never holds the process open.
+        handle.unref?.()
+        this.handle = handle
+    }
+
+    public Stop(): void
+    {
+        if (this.handle !== undefined)
+        {
+            clearTimeout(this.handle)
+            this.handle = undefined
+        }
+    }
+}
+
 // One intent on the Approvals page: what it asks in plain words, when it
 // expires, where it stands; Approve and Reject only while it waits and has not
 // expired (an expired one is shown, never approvable: Pragmatic may send it again).
@@ -56,6 +103,19 @@ export class ApprovalRowViewModel extends Observable
     }
     private static readonly FailedTemplate = 'Failed: {failure}'
     private static readonly FailureToken = '{failure}'
+    private static readonly FailureWords: Readonly<Record<IntentFailureDto, string>> = {
+        [IntentFailureDto.PrecheckRefused]: 'your hive refused it (it does not fit this hive)',
+        [IntentFailureDto.EnvironmentNotFound]: 'the environment does not exist',
+        [IntentFailureDto.EnvironmentExists]: 'an environment of that name exists already',
+        [IntentFailureDto.VersionUnavailable]: 'that version is not the one this hive runs',
+        [IntentFailureDto.NotReady]: 'it was applied but never became ready; the previous state was kept',
+        [IntentFailureDto.ConsoleUnavailable]: 'this console could not be reached in time',
+        [IntentFailureDto.RotationRefused]: 'the key change was not confirmed',
+        [IntentFailureDto.RecheckFailed]: 'it no longer passed its signature check',
+        [IntentFailureDto.ApplyFailed]: 'applying it failed',
+    }
+    private static readonly UnknownFailure = 'for a reason this console does not know'
+    private static readonly RowChanges: readonly string[] = ['IsExpired', 'IsPending', 'StatusText', 'ExpiryText', 'CanDecide']
     private static readonly ExpiresTemplate = 'Expires {at}'
     private static readonly ExpiredTemplate = 'Expired {at}'
     private static readonly AtToken = '{at}'
@@ -105,7 +165,7 @@ export class ApprovalRowViewModel extends Observable
         }
         if (this.Intent.Progress === IntentProgressDto.Failed && this.Intent.Failure !== null)
         {
-            return R.FailedTemplate.replace(R.FailureToken, this.Intent.Failure)
+            return R.FailedTemplate.replace(R.FailureToken, R.FailureWords[this.Intent.Failure as IntentFailureDto] ?? R.UnknownFailure)
         }
         return R.ProgressLabels[this.Intent.Progress as IntentProgressDto] ?? this.Intent.Progress
     }
@@ -159,11 +219,24 @@ export class ApprovalRowViewModel extends Observable
         return code !== undefined && code in R.RefusalMessages ? R.RefusalMessages[code as DecisionRefusal] : R.RefusalMessages[DecisionRefusal.Unavailable]
     }
 
+    // Re-reads the clock: a row that expired meanwhile stops offering Approve and Reject.
+    public RecheckExpiry(): void
+    {
+        for (const name of ApprovalRowViewModel.RowChanges)
+        {
+            this.RaisePropertyChanged(name, undefined, undefined)
+        }
+        this.approveCommand.RaiseCanExecuteChanged()
+        this.rejectCommand.RaiseCanExecuteChanged()
+    }
+
     public async Decide(approve: boolean): Promise<void>
     {
         const R = ApprovalRowViewModel
         if (!this.CanDecide)
         {
+            // Expired since the page drew it: show it so, and ask nothing.
+            this.RecheckExpiry()
             return
         }
         this.SetBusy(true)
@@ -223,12 +296,29 @@ export class ApprovalsViewModel extends TenantPageViewModel
     private static readonly PendingCountProperty = 'PendingCount'
     private static readonly HasPendingProperty = 'HasPending'
     private static readonly HasNoPendingProperty = 'HasNoPending'
+    private static readonly ExpiryGraceMs = 1000
 
     private rows = new ObservableCollection<ApprovalRowViewModel>()
 
-    public constructor(session: TenantSessionService, private readonly onPendingChanged: (count: number) => void = () => undefined, private readonly now: () => Date = () => new Date())
+    public constructor(
+        session: TenantSessionService,
+        private readonly onPendingChanged: (count: number) => void = () => undefined,
+        private readonly now: () => Date = () => new Date(),
+        private readonly expiry: IExpiryTimer = new TimeoutExpiryTimer())
     {
         super(session)
+    }
+
+    // Re-checks every row's expiry now (the timer's tick), then waits for the next one to expire.
+    public RecheckExpiry(): void
+    {
+        const before = this.PendingCount
+        for (const row of this.rows.ToArray())
+        {
+            row.RecheckExpiry()
+        }
+        this.RaisePending(before)
+        this.ScheduleExpiry()
     }
 
     public get Rows(): ObservableCollection<ApprovalRowViewModel>
@@ -287,7 +377,7 @@ export class ApprovalsViewModel extends TenantPageViewModel
     private Apply(intents: readonly KeptIntentDto[]): void
     {
         const A = ApprovalsViewModel
-        const before = [this.PendingCount, this.HasPending] as const
+        const before = [this.PendingCount] as const
         const old = this.rows
         this.rows = new ObservableCollection<ApprovalRowViewModel>()
         for (const intent of intents)
@@ -295,9 +385,29 @@ export class ApprovalsViewModel extends TenantPageViewModel
             this.rows.Add(new ApprovalRowViewModel(this.Session, intent, this.now, () => { void this.Refresh() }))
         }
         this.RaisePropertyChanged(A.RowsProperty, old, this.rows)
-        this.RaisePropertyChanged(A.PendingCountProperty, before[0], this.PendingCount)
-        this.RaisePropertyChanged(A.HasPendingProperty, before[1], this.HasPending)
-        this.RaisePropertyChanged(A.HasNoPendingProperty, !before[1], this.HasNoPending)
+        this.RaisePending(before[0])
+        this.ScheduleExpiry()
+    }
+
+    private RaisePending(before: number): void
+    {
+        const A = ApprovalsViewModel
+        this.RaisePropertyChanged(A.PendingCountProperty, before, this.PendingCount)
+        this.RaisePropertyChanged(A.HasPendingProperty, before > 0, this.HasPending)
+        this.RaisePropertyChanged(A.HasNoPendingProperty, before === 0, this.HasNoPending)
         this.onPendingChanged(this.PendingCount)
+    }
+
+    // The next pending row's expiry, a moment after it passes; none while nothing waits.
+    private ScheduleExpiry(): void
+    {
+        const now = this.now().getTime()
+        const next = this.rows.ToArray().filter(row => row.IsPending).map(row => Date.parse(row.Intent.ExpiresAt)).sort((a, b) => a - b)[0]
+        if (next === undefined)
+        {
+            this.expiry.Stop()
+            return
+        }
+        this.expiry.Start(Math.max(0, next - now) + ApprovalsViewModel.ExpiryGraceMs, () => this.RecheckExpiry())
     }
 }

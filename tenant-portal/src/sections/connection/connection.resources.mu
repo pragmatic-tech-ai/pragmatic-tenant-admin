@@ -9,6 +9,7 @@
 import ConnectionPageViewModel from "./connection-page-view-model.js"
 import ConnectionEnvironmentRowViewModel from "./connection-page-view-model.js"
 import ConnectHiveViewModel from "./connect-hive-view-model.js"
+import ApprovalsSectionService from "../approvals/approvals-section-service.js"
 
 resources ConnectionResources {
     // "Connect this hive": the cabinet's one-time code, the level and how the console is reached (C3.3).
@@ -115,6 +116,10 @@ resources ConnectionResources {
                                 }
                                 TextBlock [ Text = "Your hive reports its health to Pragmatic over a signed channel it opens itself. Pragmatic holds only its public key.",
                                             Foreground = @Fg2, TextWrapping = Wrap, Margin = (0,8,0,0) ]
+                                // The changes Pragmatic asked this hive to make (C3.4), waiting or done.
+                                Button [ Variant = Ghost, Command = $service(ApprovalsSectionService).OpenCommand, HorizontalAlignment = Left, Margin = (0,8,0,0) ] {
+                                    TextBlock [ Text = "Changes from Pragmatic" ]
+                                }
                             }
                         }
                     }

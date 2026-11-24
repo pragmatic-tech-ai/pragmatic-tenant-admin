@@ -1,31 +1,67 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { KubeApiClient, type IKubeTransport, type KubeContentType, type KubeMethod, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
+import { X509Certificate } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { KubeApiClient, KubeMethod, type IKubeTransport, type KubeContentType, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
 import { EngineSecretSet } from '../../bootstrap/engine-secret-set.js'
-import type { ITlsMinter, TlsMaterial } from '../../bootstrap/tls-minter.js'
-import { ConsoleCertificateRenewal, type ICertificateCopies } from '../console-certificate-renewal.js'
+import type { ITlsMinter, LeafMaterial, TlsMaterial } from '../../bootstrap/tls-minter.js'
+import { CertificateRenewalKind, ConsoleCertificateRenewal, type ICertificateCopies } from '../console-certificate-renewal.js'
 
-class RecordingTransport implements IKubeTransport
+class RenewalFixture
 {
-    public readonly Writes: { Path: string, Body: { metadata: { name: string }, data: Record<string, string> } }[] = []
+    public static readonly CaPem = readFileSync(new URL('./fixtures/fixture-ca.crt', import.meta.url), 'utf8')
+    public static readonly CaEnd = new X509Certificate(RenewalFixture.CaPem).validToDate
+    public static readonly Base = '/api/v1/namespaces/pragmatic-system/secrets/'
+}
+
+/** The pragmatic-system Secrets: reads answer what is stored, writes (server-side apply) replace it. */
+class SecretsTransport implements IKubeTransport
+{
+    public readonly Writes: { Name: string, Data: Record<string, string> }[] = []
+    public readonly Stored = new Map<string, Record<string, string>>()
 
     public async Send(method: KubeMethod, path: string, body: string | undefined, contentType: KubeContentType): Promise<KubeResponse>
     {
-        void method
         void contentType
-        this.Writes.push({ Path: path, Body: JSON.parse(body ?? '{}') })
+        const name = path.replace(RenewalFixture.Base, '').split('?')[0] as string
+        if (method === KubeMethod.Get)
+        {
+            const data = this.Stored.get(name)
+            return data === undefined ? { status: 404, body: '{}' } : { status: 200, body: JSON.stringify({ data }) }
+        }
+        const parsed = JSON.parse(body ?? '{}') as { data: Record<string, string> }
+        this.Writes.push({ Name: name, Data: parsed.data })
+        this.Stored.set(name, parsed.data)
         return { status: 200, body: '{}' }
+    }
+
+    public Store(name: string, key: string, value: string): void
+    {
+        this.Stored.set(name, { [key]: Buffer.from(value).toString('base64') })
+    }
+
+    public Decoded(name: string, key: string): string
+    {
+        return Buffer.from(this.Stored.get(name)?.[key] ?? '', 'base64').toString('utf8')
     }
 }
 
-class FixedMinter implements ITlsMinter
+class FakeMinter implements ITlsMinter
 {
-    public readonly Hosts: string[][] = []
+    public readonly Leaves: { Hosts: string[], Ca: string, Key: string }[] = []
+    public CaMints = 0
 
     public Mint(hosts: readonly string[]): TlsMaterial
     {
-        this.Hosts.push([...hosts])
-        return { Ca: Buffer.from('CA'), Cert: Buffer.from('CERT'), Key: Buffer.from('KEY') }
+        void hosts
+        this.CaMints += 1
+        return { Ca: Buffer.from('NEW-CA\n'), Cert: Buffer.from('NEW-CERT'), Key: Buffer.from('NEW-KEY'), CaKey: Buffer.from('NEW-CA-KEY') }
+    }
+
+    public MintLeaf(hosts: readonly string[], caCert: Buffer, caKey: Buffer): LeafMaterial
+    {
+        this.Leaves.push({ Hosts: [...hosts], Ca: caCert.toString('utf8'), Key: caKey.toString('utf8') })
+        return { Cert: Buffer.from('LEAF-CERT'), Key: Buffer.from('LEAF-KEY') }
     }
 }
 
@@ -41,27 +77,68 @@ class CountingCopies implements ICertificateCopies
 
 describe('ConsoleCertificateRenewal', () =>
 {
-    it('re-mints the engine\'s own certificate for the console, sign-in service and environments, CA first, then refreshes the copies', async () =>
+    const Renewal = (transport: SecretsTransport, minter: FakeMinter, copies: CountingCopies, now: Date = new Date(RenewalFixture.CaEnd.getTime() - 365 * 86_400_000)): ConsoleCertificateRenewal =>
+        new ConsoleCertificateRenewal(new KubeApiClient(transport), minter, EngineSecretSet.ConsoleTls, 'acme', 'console.acme.example', 'acme.example', copies, () => now)
+
+    it('renews the certificate under the existing CA: the CA and its key stay, so what trusts the CA keeps trusting it', async () =>
     {
-        const transport = new RecordingTransport()
-        const minter = new FixedMinter()
+        const transport = new SecretsTransport()
+        transport.Store(EngineSecretSet.DevCa, EngineSecretSet.CaKey, RenewalFixture.CaPem)
+        transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, 'THE-CA-KEY')
+        const minter = new FakeMinter()
         const copies = new CountingCopies()
-        const renewal = new ConsoleCertificateRenewal(new KubeApiClient(transport), minter, EngineSecretSet.ConsoleTls, 'acme', 'console.acme.example', 'acme.example', copies)
-        assert.equal(await renewal.Renew(), true)
-        assert.deepEqual(minter.Hosts[0], ['console.acme.example', 'idp-acme.acme.example', '*.acme.example'])
-        assert.deepEqual(transport.Writes.map(write => write.Body.metadata.name), [EngineSecretSet.DevCa, EngineSecretSet.ConsoleTls])
-        assert.ok(transport.Writes.every(write => write.Path.includes('/namespaces/pragmatic-system/secrets/')))
-        assert.equal(transport.Writes[1]?.Body.data[EngineSecretSet.TlsCertKey], Buffer.from('CERT').toString('base64'))
+        assert.equal(await Renewal(transport, minter, copies).RenewAs(), CertificateRenewalKind.Leaf)
+        assert.equal(minter.CaMints, 0, 'no new CA')
+        assert.deepEqual(minter.Leaves[0]?.Hosts, ['console.acme.example', 'idp-acme.acme.example', '*.acme.example'])
+        assert.equal(minter.Leaves[0]?.Ca.trim(), RenewalFixture.CaPem.trim())
+        assert.equal(minter.Leaves[0]?.Key, 'THE-CA-KEY')
+        assert.deepEqual(transport.Writes.map(write => write.Name), [EngineSecretSet.ConsoleTls], 'only the certificate is written')
+        assert.equal(transport.Decoded(EngineSecretSet.ConsoleTls, EngineSecretSet.TlsCertKey), 'LEAF-CERT')
         assert.equal(copies.Refreshed, 1)
+    })
+
+    it('a CA within its renewal window, or one whose key was never kept, is replaced with the old CA kept in the bundle', async () =>
+    {
+        for (const [keyKept, now] of [[true, new Date(RenewalFixture.CaEnd.getTime() - 30 * 86_400_000)], [false, new Date(RenewalFixture.CaEnd.getTime() - 365 * 86_400_000)]] as const)
+        {
+            const transport = new SecretsTransport()
+            transport.Store(EngineSecretSet.DevCa, EngineSecretSet.CaKey, RenewalFixture.CaPem)
+            if (keyKept)
+            {
+                transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, 'THE-CA-KEY')
+            }
+            const minter = new FakeMinter()
+            assert.equal(await Renewal(transport, minter, new CountingCopies(), now).RenewAs(), CertificateRenewalKind.NewCa)
+            assert.deepEqual(transport.Writes.map(write => write.Name), [EngineSecretSet.DevCaKey, EngineSecretSet.DevCa, EngineSecretSet.ConsoleTls], 'key, CA bundle, then certificate')
+            const bundle = transport.Decoded(EngineSecretSet.DevCa, EngineSecretSet.CaKey)
+            assert.ok(bundle.startsWith('NEW-CA'), 'the new CA issues')
+            assert.ok(bundle.includes(RenewalFixture.CaPem.trim()), 'the old CA is still trusted')
+            assert.equal(transport.Decoded(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey), 'NEW-CA-KEY')
+        }
+    })
+
+    it('an old CA past its end is dropped from the bundle', async () =>
+    {
+        const transport = new SecretsTransport()
+        transport.Store(EngineSecretSet.DevCa, EngineSecretSet.CaKey, RenewalFixture.CaPem)
+        await Renewal(transport, new FakeMinter(), new CountingCopies(), new Date(RenewalFixture.CaEnd.getTime() + 86_400_000)).RenewAs()
+        assert.equal(transport.Decoded(EngineSecretSet.DevCa, EngineSecretSet.CaKey).trim(), 'NEW-CA')
     })
 
     it('an operator\'s certificate is theirs: nothing is minted or written', async () =>
     {
-        const transport = new RecordingTransport()
-        const minter = new FixedMinter()
+        const transport = new SecretsTransport()
+        const minter = new FakeMinter()
         const renewal = new ConsoleCertificateRenewal(new KubeApiClient(transport), minter, 'acme-wildcard-tls', 'acme', 'console.acme.example', 'acme.example', undefined)
         assert.equal(renewal.OwnCertificate, false)
         assert.equal(await renewal.Renew(), false)
-        assert.equal(minter.Hosts.length + transport.Writes.length, 0)
+        assert.equal(minter.CaMints + minter.Leaves.length + transport.Writes.length, 0)
+    })
+
+    it('reads every certificate of a bundle, issuer first', () =>
+    {
+        const two = Buffer.from(RenewalFixture.CaPem + '\n' + RenewalFixture.CaPem)
+        assert.equal(ConsoleCertificateRenewal.Certificates(two).length, 2)
+        assert.deepEqual(ConsoleCertificateRenewal.Certificates(undefined), [])
     })
 })

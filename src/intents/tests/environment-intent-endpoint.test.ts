@@ -10,7 +10,7 @@ import {
 } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { AgentCallerCheck } from '../agent-caller-check.js'
 import { EnvironmentIntentApplier, type IConsoleCertificateRenewal } from '../environment-intent-applier.js'
-import { EnvironmentIntentEndpoint, type IAgentCallers } from '../environment-intent-endpoint.js'
+import { CallerReviewBudget, EnvironmentIntentEndpoint, type IAgentCallers } from '../environment-intent-endpoint.js'
 
 /** The console's environment service, standing in: records the calls. */
 class FakeEnvironments implements Pick<IEnvironmentService, 'Create' | 'Delete' | 'Restart' | 'List'>
@@ -18,10 +18,13 @@ class FakeEnvironments implements Pick<IEnvironmentService, 'Create' | 'Delete' 
     public readonly Records: EnvironmentRecord[] = []
     public readonly Calls: unknown[][] = []
     public Fail: Error | undefined
+    /** When set, Create waits on it (a create still running when the agent retries). */
+    public Gate: Promise<void> | undefined
 
     public async Create(name: string, template: Template, type: EnvType, hostPort?: number, hiveId?: string, creatorPrincipalId?: string): Promise<EnvironmentRecord>
     {
         this.Calls.push(['create', name, template, type, hostPort, hiveId, creatorPrincipalId])
+        await this.Gate
         if (this.Fail !== undefined)
         {
             throw this.Fail
@@ -125,7 +128,7 @@ class EndpointWorld
 
     public Applier(certificate: IConsoleCertificateRenewal | undefined = this.Certificate): EnvironmentIntentApplier
     {
-        return new EnvironmentIntentApplier({ Service: this.Environments, HiveId: () => 'acme-hive', EngineVersion: EndpointWorld.Version, Created: this.Created, Certificate: certificate })
+        return new EnvironmentIntentApplier({ Service: this.Environments, HiveId: () => 'acme-hive', Creator: () => 'owner', EngineVersion: EndpointWorld.Version, Created: this.Created, Certificate: certificate })
     }
 
     public async Endpoint(): Promise<{ Endpoint: EnvironmentIntentEndpoint, Url: string, Events: string[] }>
@@ -161,6 +164,9 @@ describe('EnvironmentIntentEndpoint', () =>
             assert.equal(malformed.status, 400)
             assert.equal(malformed.json.code, ConsoleIntentRefusal.Malformed)
             assert.equal((await fetch(Url, { method: 'GET' })).status, 405)
+            const tooLarge = await EndpointWorld.Post(Url, { IntentId: 'inabcdefghijkl', Padding: 'x'.repeat(ConsoleIntentLink.BodyLimit) })
+            assert.equal(tooLarge.status, 413)
+            assert.deepEqual(tooLarge.json, ConsoleIntentLink.RefusalBody(ConsoleIntentRefusal.Malformed), 'a coded refusal the agent reads')
             assert.equal((await fetch(Url.replace(ConsoleIntentLink.Path, '/internal/other'), { method: 'POST' })).status, 404)
         }
         finally
@@ -178,11 +184,12 @@ describe('EnvironmentIntentEndpoint', () =>
             const reply = await EndpointWorld.Post(Url, ConsoleIntentCall.Create('inabcdefghijkl', new CreateEnvironment('prod', EnvironmentPurpose.Runtime, null)).ToJson())
             assert.equal(reply.status, 200)
             assert.deepEqual(reply.json, ConsoleIntentOutcome.Applied.ToJson())
-            // RouteEnvCreate's call: name, template, type, no host port, the console's hive (the creator is the console itself).
-            assert.deepEqual(world.Environments.Calls[0], ['create', 'prod', Template.RuntimePostgres, EnvType.Runtime, undefined, 'acme-hive', undefined])
+            // RouteEnvCreate's call: name, template, type, no host port, the console's hive, and a creator, so the runtime
+            // environment is seeded with its administrator as a console create is: here the tenant's Owner principal.
+            assert.deepEqual(world.Environments.Calls[0], ['create', 'prod', Template.RuntimePostgres, EnvType.Runtime, undefined, 'acme-hive', 'owner'])
             const dev = await EndpointWorld.Post(Url, ConsoleIntentCall.Create('inbbbbbbbbbbbb', new CreateEnvironment('dev', EnvironmentPurpose.Development, EndpointWorld.Version)).ToJson())
             assert.equal(dev.json.Progress, IntentProgress.Applied)
-            assert.deepEqual(world.Environments.Calls[1], ['create', 'dev', Template.DevBlank, EnvType.Development, undefined, 'acme-hive', undefined])
+            assert.deepEqual(world.Environments.Calls[1], ['create', 'dev', Template.DevBlank, EnvType.Development, undefined, 'acme-hive', 'owner'])
         }
         finally
         {
@@ -207,6 +214,42 @@ describe('EnvironmentIntentApplier', () =>
         assert.equal((await world.Applier().Apply(ConsoleIntentCall.Create('inhhhhhhhhhhhh', new CreateEnvironment('stage', EnvironmentPurpose.Development, null)))).Failure, IntentFailure.EnvironmentExists)
         world.Environments.Fail = new Error('quota')
         assert.equal((await world.Applier().Apply(ConsoleIntentCall.Create('indddddddddddd', new CreateEnvironment('qa', EnvironmentPurpose.Development, null)))).Failure, IntentFailure.ApplyFailed)
+    })
+
+    it('a retry while the create runs waits for the same create and answers its outcome, not environment-exists', async () =>
+    {
+        const world = new EndpointWorld()
+        let open = (): void => undefined
+        world.Environments.Gate = new Promise<void>(resolve => { open = resolve })
+        const applier = world.Applier()
+        const create = ConsoleIntentCall.Create('inabcdefghijkl', new CreateEnvironment('prod', EnvironmentPurpose.Runtime, null))
+        const first = applier.Apply(create)
+        const retry = applier.Apply(create)
+        open()
+        assert.deepEqual([(await first).Progress, (await retry).Progress], [IntentProgress.Applied, IntentProgress.Applied])
+        assert.equal(world.Environments.Calls.length, 1, 'one create')
+    })
+
+    it('a name taken meanwhile is environment-exists, and a later retry never takes that environment for this intent\'s', async () =>
+    {
+        const world = new EndpointWorld()
+        const create = ConsoleIntentCall.Create('inabcdefghijkl', new CreateEnvironment('prod', EnvironmentPurpose.Runtime, null))
+        world.Environments.Fail = new EnvironmentExistsError('prod')
+        assert.equal((await world.Applier().Apply(create)).Failure, IntentFailure.EnvironmentExists)
+        assert.equal(world.Created.Saved.has('inabcdefghijkl'), false, 'the note is removed')
+        // Someone else's environment of that name is there now.
+        world.Environments.Fail = undefined
+        world.Environments.Records.push({ name: 'prod', type: EnvType.Runtime, template: Template.RuntimePostgres, environmentId: 'prod', createdAt: '', status: EnvStatus.Running })
+        assert.equal((await world.Applier().Apply(create)).Failure, IntentFailure.EnvironmentExists)
+    })
+
+    it('a console that stopped mid-create creates again for the noted intent when nothing was registered', async () =>
+    {
+        const world = new EndpointWorld()
+        world.Created.Saved.set('inabcdefghijkl', 'prod')
+        const create = ConsoleIntentCall.Create('inabcdefghijkl', new CreateEnvironment('prod', EnvironmentPurpose.Runtime, null))
+        assert.equal((await world.Applier().Apply(create)).Progress, IntentProgress.Applied)
+        assert.equal(world.Environments.Calls.length, 1)
     })
 
     it('a version other than the engine\'s is version-unavailable; update and repair restart the environment or find none', async () =>
@@ -290,5 +333,45 @@ describe('the intent endpoint is served only by a connected engine that names it
         assert.equal(EngineConsoleHost.IntentRoutesOf({}), undefined)
         assert.equal(EngineConsoleHost.IntentRoutesOf({ PRAGMATIC_ENGINE_MODE: 'standalone' }), undefined)
         assert.ok(EngineConsoleHost.IntentRoutesOf(connected) !== undefined)
+    })
+})
+
+describe('CallerReviewBudget', () =>
+{
+    it('a source past its budget is refused without a caller review until the minute is over', async () =>
+    {
+        let now = 1_000_000
+        const budget = new CallerReviewBudget(2, () => now)
+        assert.deepEqual([budget.Take('10.0.0.5'), budget.Take('10.0.0.5'), budget.Take('10.0.0.5'), budget.Take('10.0.0.6')], [true, true, false, true])
+        now += 60_000
+        assert.equal(budget.Take('10.0.0.5'), true)
+        const world = new EndpointWorld()
+        let reviews = 0
+        const endpoint = new EnvironmentIntentEndpoint(world.Applier(), { IsAgent: async () => { reviews += 1; return false } }, { Event: () => undefined }, new CallerReviewBudget(1))
+        await endpoint.Listen(0, '127.0.0.1')
+        try
+        {
+            const url = 'http://127.0.0.1:' + endpoint.Address().port + ConsoleIntentLink.Path
+            assert.equal((await EndpointWorld.Post(url, {})).status, 403)
+            const over = await EndpointWorld.Post(url, {})
+            assert.equal(over.status, 503)
+            assert.equal(over.json.code, ConsoleIntentRefusal.Unavailable)
+            assert.equal(reviews, 1, 'no review past the budget')
+        }
+        finally
+        {
+            await endpoint.Close()
+        }
+    })
+
+    it('a connected engine without the agent account logs once that the endpoint is off', async () =>
+    {
+        const { TenantAdminServer } = await import('../../tenant-admin-server.js')
+        const { EngineComposition } = await import('../../engine-composition.js')
+        const lines: string[] = []
+        const env = { PRAGMATIC_ENGINE_MODE: 'connected' }
+        assert.equal(await TenantAdminServer.IntentEndpointOf(env, undefined, undefined, undefined as never, undefined as never, undefined as never, EngineComposition.From(env), undefined as never, line => lines.push(line)), undefined)
+        assert.equal(lines.length, 1)
+        assert.match(lines[0] ?? '', /PRAGMATIC_ENGINE_AGENT_SERVICE_ACCOUNT is not set/)
     })
 })

@@ -138,6 +138,22 @@ describe('PlatformIntentRoutes', () =>
     })
 })
 
+describe('PlatformIntentRoutes while the agent is busy', () =>
+{
+    it('a decision the agent could not answer in time shows the intent as the agent keeps it now, not a failure', async () =>
+    {
+        const agent = new FakeIntentsAgent()
+        agent.Refusal = IntentDecisionRefusal.Unavailable
+        const routes = new PlatformIntentRoutes(agent)
+        const reply = await IntentRoutesFixture.Send(routes, 'POST', '/tenant-api/intents/' + IntentSamples.Id + '/approve', { IntentDigest: IntentSamples.Digest })
+        assert.equal(reply.status, 200)
+        assert.equal(reply.json.IntentId, IntentSamples.Id)
+        assert.equal(reply.json.Progress, IntentProgress.AwaitingApproval)
+        const unknown = await IntentRoutesFixture.Send(routes, 'POST', '/tenant-api/intents/inzzzzzzzzzzzz/approve', { IntentDigest: IntentSamples.Digest })
+        assert.deepEqual(unknown.json, IntentInternalLink.RefusalBody(IntentDecisionRefusal.Unavailable), 'an intent the agent does not list stays unavailable')
+    })
+})
+
 describe('HiveIntentsClient', () =>
 {
     it('lists and decides with the console\'s token; a refusal is its code, an answer not ours is unavailable', async () =>

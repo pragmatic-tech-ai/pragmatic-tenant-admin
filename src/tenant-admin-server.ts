@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { UserSeeder, AdminProxy, WsAdminConnector, AuditRegistry, BundleBuilderAdapter, UserSeederAdapter, NoHostEnvironmentRuntime, EnvironmentRuntimeResolver, InClusterEnvironmentRuntime, EnvironmentPlacement, EnvironmentRegistry, EnvironmentService, GraphService, TenantGraphAccess, type IEnvironmentReach, HiveHealthProducer, HiveOrchestratorFactory, type InClusterOrchestration, IngressTlsPolicy, type IngressTls, IdpAdminClient, type IIdpService, MasterKeyFile, NetPortProbe, PortAllocator, TenantPlaneComposer, type HiveRecord, type TenantRecord, ConsoleFingerprint, ConsoleAdvertSender, HttpConsoleAdvertTransport, IntervalAdvertTimer, SeededConsoleAccounts, type IOwnerResetFollower, ConsoleEmailDomainStore, ConsoleFingerprintKeys, ConsoleRegistration, type IRecordMap, type IRolloutClient, TenantAdminEnv, TenantAdminClientRegistry, TenantHostResolver, type ConsoleHostAlias, type TenantPlane, TenantSessions, TenantHealthMonitor, TenantConsoleHost, type IEnvironmentService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { UserSeeder, AdminProxy, WsAdminConnector, AuditRegistry, BundleBuilderAdapter, UserSeederAdapter, NoHostEnvironmentRuntime, EnvironmentRuntimeResolver, InClusterEnvironmentRuntime, EnvironmentPlacement, EnvironmentRegistry, EnvironmentService, GraphService, TenantGraphAccess, type IEnvironmentReach, HiveHealthProducer, HiveOrchestratorFactory, type InClusterOrchestration, IngressTlsPolicy, type IngressTls, IdpAdminClient, type IIdpService, MasterKeyFile, NetPortProbe, PortAllocator, TenantPlaneComposer, type HiveRecord, type TenantRecord, ConsoleFingerprint, ConsoleAdvertSender, HttpConsoleAdvertTransport, IntervalAdvertTimer, SeededConsoleAccounts, type IOwnerResetFollower, ConsoleEmailDomainStore, ConsoleFingerprintKeys, ConsoleRegistration, type IRecordMap, type IRolloutClient, TenantAdminEnv, TenantAdminClientRegistry, TenantHostResolver, type ConsoleHostAlias, type TenantPlane, TenantSessions, TenantHealthMonitor, TenantConsoleHost, TenantOwner, type IEnvironmentService } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { InClusterEnvironmentReach } from './in-cluster-environment-reach.js'
 import { HttpsKubeTransport, InClusterServiceAccount, KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import type { PinnedImageVerifier } from '@pragmatic-tech-ai/pragmatic-release-toolkit'
@@ -127,6 +127,7 @@ export class TenantAdminServer
     private static readonly DesktopRealmSignInDefault = true
     private static readonly MissingEnvPrefix = 'Missing required environment variable: '
     private static readonly MissingMasterKeyPrefix = 'Tenant-admin master key file not found: '
+    private static readonly NoIntentEndpointLine = '[intents] the internal intent endpoint is off: PRAGMATIC_ENGINE_AGENT_SERVICE_ACCOUNT is not set, so the hive agent cannot forward environment intents'
     private static readonly ListeningTemplate = 'Tenant plane listening on {scheme}://{domain}:{port}/'
     private static readonly SchemeToken = '{scheme}'
     private static readonly DomainToken = '{domain}'
@@ -497,6 +498,17 @@ export class TenantAdminServer
         try
         {
             await composition.host.Listen(cfg.port, cfg.bind)
+            // The agent's internal intent endpoint, beside the public listener (a connected engine only); a failure to bind
+            // it closes the public one too, so nothing is left listening.
+            try
+            {
+                await composition.intents?.Listen()
+            }
+            catch (err)
+            {
+                await composition.host.Close()
+                throw err
+            }
         }
         catch (err)
         {
@@ -519,8 +531,6 @@ export class TenantAdminServer
             : self.AwaitReady(repository, tenantId, awaiting)
                 .then(outcome => log(TenantAdminServer.SelfApplyPrefix + outcome))
                 .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
-        // The agent's internal intent endpoint, beside the public listener (a connected engine only).
-        await composition.intents?.Listen()
         // Only a listener that bound counts as running, so Close after a failed Listen has nothing to stop.
         this.running = composition
         this.ownsDatabase = database === undefined
@@ -587,7 +597,16 @@ export class TenantAdminServer
     public static async IntentEndpointOf(env: NodeJS.ProcessEnv, account: InClusterServiceAccount | undefined, client: KubeApiClient | undefined, db: TenantAdminDatabase, service: IEnvironmentService, directory: SeededTenantDirectory, engine: EngineComposition, cfg: TenantAdminConfig, log: (line: string) => void): Promise<EnvironmentIntentEndpoint | undefined>
     {
         const agent = EngineEnv.OptionalOf(env, EngineEnv.AgentServiceAccount)
-        if (engine.Mode !== EngineMode.Connected || agent === undefined || account === undefined || client === undefined)
+        if (engine.Mode !== EngineMode.Connected)
+        {
+            return undefined
+        }
+        if (agent === undefined)
+        {
+            log(TenantAdminServer.NoIntentEndpointLine)
+            return undefined
+        }
+        if (account === undefined || client === undefined)
         {
             return undefined
         }
@@ -597,6 +616,7 @@ export class TenantAdminServer
         const applier = new EnvironmentIntentApplier({
             Service: service,
             HiveId: () => TenantAdminServer.FirstHiveOf(directory).id,
+            Creator: () => TenantOwner.PrincipalOf(directory.Tenant),
             EngineVersion: EngineEnv.OptionalOf(env, EngineEnv.EngineVersion),
             Created: await db.Map<string>(TenantAdminRegistry.IntentEnvironments),
             Certificate: certificate,
