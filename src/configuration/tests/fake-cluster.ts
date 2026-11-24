@@ -26,7 +26,10 @@ export class FakeClock implements IRolloutClock
  * strategic merge and merge patch merge, null removes) and DELETE. A Deployment rolls like the controller with
  * `maxUnavailable: 0, maxSurge: 1` and one replica: a changed pod template starts a new pod, which becomes ready only when
  * `Readies(template)` says so; until then the old pod keeps running and serving (`Serving` is never empty mid-roll). A
- * template equal to the one the old pod runs (a revert) is that pod's again at once.
+ * template equal to the one the old pod runs (a revert) is that pod's again at once. A Deployment named in `Recreated` has
+ * one pod whose readiness follows `Readies` too (no old pod serves meanwhile). With `minReadySeconds`, a ready pod counts
+ * as available only once it has been ready that long by `Clock` (a pod's readiness is read at every GET), and a surge pod
+ * replaces the old one only once available.
  */
 export class FakeCluster implements IKubeTransport
 {
@@ -40,6 +43,12 @@ export class FakeCluster implements IKubeTransport
     public readonly Outages: string[] = []
     /** Status codes to answer instead, by `METHOD path` (consumed once). */
     public readonly Refusals = new Map<string, number>()
+    /** Deployments whose only pod is judged by `Readies` (a recreated workload: no old pod serves). */
+    public readonly Recreated = new Set<string>()
+    /** The time `minReadySeconds` is counted by. */
+    public Clock: FakeClock | undefined
+    // Since when each pod (by deployment path and template) has been ready; the pods a Put starts were ready long before.
+    private readonly readySince = new Map<string, number>()
 
     public Put(path: string, object: Obj): void
     {
@@ -48,6 +57,7 @@ export class FakeCluster implements IKubeTransport
         {
             object.metadata.generation = 1
             this.Pods.set(path, [structuredClone(object.spec.template)])
+            this.readySince.set(FakeCluster.PodKey(path, object.spec.template), Number.NEGATIVE_INFINITY)
             this.Objects.set(path, structuredClone(object))
             this.Settle(path)
         }
@@ -133,13 +143,32 @@ export class FakeCluster implements IKubeTransport
         this.Settle(path)
     }
 
-    // The controller's view: a surge pod that readies replaces the old one.
+    // The controller's view at every read: the pods' readiness now, and a surge pod that is available replaces the old one.
     private Tick(path: string): void
     {
         const pods = this.Pods.get(path)
-        if (pods === undefined || pods.length < 2) return
-        if (this.Readies(pods[1])) this.Pods.set(path, [pods[1]])
+        if (pods === undefined) return
         this.Settle(path)
+        if (pods.length < 2 || !this.IsAvailable(path, pods[1])) return
+        this.Pods.set(path, [pods[1]])
+        this.Settle(path)
+    }
+
+    private IsReady(path: string, pod: Obj, index: number): boolean
+    {
+        return (index === 0 && !this.Recreated.has(path)) || this.Readies(pod)
+    }
+
+    private IsAvailable(path: string, pod: Obj): boolean
+    {
+        const since = this.readySince.get(FakeCluster.PodKey(path, pod))
+        const minReady = (this.Objects.get(path)?.spec?.minReadySeconds ?? 0) * 1000
+        return since !== undefined && (this.Clock?.Now() ?? 0) - since >= minReady
+    }
+
+    private static PodKey(path: string, pod: Obj): string
+    {
+        return path + ' ' + JSON.stringify(pod)
     }
 
     private Settle(path: string): void
@@ -149,13 +178,21 @@ export class FakeCluster implements IKubeTransport
         if (deployment === undefined) return
         const template = JSON.stringify(deployment.spec.template)
         const updated = pods.filter(p => JSON.stringify(p) === template)
-        const ready = pods.filter((p, i) => i === 0 || this.Readies(p))
+        const now = this.Clock?.Now() ?? 0
+        pods.forEach((p, i) =>
+        {
+            const key = FakeCluster.PodKey(path, p)
+            if (!this.IsReady(path, p, i)) this.readySince.delete(key)
+            else if (!this.readySince.has(key)) this.readySince.set(key, now)
+        })
+        const ready = pods.filter((p, i) => this.IsReady(path, p, i))
         if (ready.length === 0) this.Outages.push(path)
         deployment.status = {
             observedGeneration: deployment.metadata.generation,
             replicas: pods.length,
             updatedReplicas: updated.length,
             readyReplicas: ready.length,
+            availableReplicas: pods.filter(p => this.IsAvailable(path, p)).length,
         }
     }
 

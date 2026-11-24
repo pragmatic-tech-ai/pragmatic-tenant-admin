@@ -20,6 +20,7 @@ import { SecretVariable } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { ConsoleStartFallback } from './configuration/console-start-fallback.js'
 import type { ConfigurationPreparer } from './configuration/configuration-preparer.js'
 import type { ConsoleSelfApply } from './configuration/console-self-apply.js'
+import { PreparationSchedule } from './configuration/preparation-schedule.js'
 import { ReleaseDescriptorCatalogue } from './configuration/release-descriptor-catalogue.js'
 
 export type TenantAdminConfig = {
@@ -58,6 +59,8 @@ export type TenantAdminComposition = {
     readonly selfApply: ConsoleSelfApply | undefined
     /** Prepares the configurations for the release's descriptors at start; undefined outside a pod. */
     readonly preparer: ConfigurationPreparer | undefined
+    /** Prepares them again while the console runs (what a target runs changes after the platform rolls it); undefined outside a pod. */
+    readonly preparation: PreparationSchedule | undefined
     readonly directory: SeededTenantDirectory
     readonly rollout: IRolloutClient
     readonly plane: TenantPlane
@@ -110,6 +113,8 @@ export class TenantAdminServer
     private static readonly BytesSuffix = ' bytes'
 
     private running: TenantAdminComposition | undefined
+    /** The watch that proves (or puts back) the console's own apply this process was started by; ends at Close. */
+    private selfReadiness: Promise<void> | undefined
     /** Whether Run opened the running composition's database (and Close therefore ends it). */
     private ownsDatabase = false
 
@@ -379,7 +384,7 @@ export class TenantAdminServer
             Graphs: graphs,
             Configuration: configuration.Service,
         })
-        const selfApply = inCluster === undefined ? undefined : ConsoleConfiguration.SelfOf(inCluster.client, tenant.id, TenantAdminServer.FirstHiveOf(directory).id)
+        const selfApply = configuration.Self
         const monitor = cfg.probeMs > 0
             ? new TenantHealthMonitor(directory, new HiveHealthProducer(service, orchestrators, placement), plane.events, cfg.probeMs, cfg.probeTimeoutMs, service)
             : undefined
@@ -400,7 +405,8 @@ export class TenantAdminServer
         // and relays (the host has attached both to plane.principals above).
         const follower = new ConsoleOwnerResetFollower(plane.principals, tenant, await db.Map(R.OwnerResetApplied))
         const advert = advertSettings === undefined ? undefined : TenantAdminServer.SenderFrom(advertSettings, tenant, emailDomains, log, follower, registration)
-        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer }
+        return { directory, rollout: this.rollout, plane, host, monitor, config: cfg, reach, emailDomains, advert, desktopAudit, graphAudit, registration, database: db, selfApply, preparer: configuration.Preparer,
+            preparation: configuration.Preparer === undefined ? undefined : new PreparationSchedule(configuration.Preparer, log) }
     }
 
     /**
@@ -411,13 +417,14 @@ export class TenantAdminServer
     {
         const composition = await this.Compose(env, undefined, log, database)
         const cfg = composition.config
-        // An apply the console made to itself ended with its restart: complete it by what this console runs, before any
-        // new apply can begin.
+        // An apply the console made to itself ended with its restart: settle what this console does not run before any new
+        // apply can begin; the one it runs stays pending, with what ran before kept, until this console is proven ready.
         const repository = await composition.database.Configuration()
         const tenantId = composition.directory.Tenant.id
-        await composition.selfApply?.Settle(repository, tenantId)
-            .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
-        await composition.selfApply?.SettleInterrupted(repository, tenantId, ReleaseDescriptorCatalogue.HiveComponents)
+        const self = composition.selfApply
+        const awaiting = self === undefined ? undefined : await self.Settle(repository, tenantId)
+            .catch(err => TenantAdminServer.Logged(log, TenantAdminServer.SettleFailed, err))
+        await self?.SettleInterrupted(repository, tenantId, ReleaseDescriptorCatalogue.HiveComponents)
             .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
         try
         {
@@ -425,12 +432,24 @@ export class TenantAdminServer
         }
         catch (err)
         {
+            // A console its own apply started that cannot even listen puts back what ran before, then stops.
+            if (self !== undefined && awaiting !== undefined)
+            {
+                await self.AbandonOnce(repository, tenantId, awaiting)
+                    .catch(failed => log(TenantAdminServer.SettleFailed + (failed instanceof Error ? failed.message : String(failed))))
+            }
             if (database === undefined)
             {
                 await composition.database.Close()
             }
             throw err
         }
+        // Proven once its own Deployment has been ready for a while, else put back (in the background: serving goes on).
+        this.selfReadiness = self === undefined || awaiting === undefined
+            ? undefined
+            : self.AwaitReady(repository, tenantId, awaiting)
+                .then(outcome => log(TenantAdminServer.SelfApplyPrefix + outcome))
+                .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
         // Only a listener that bound counts as running, so Close after a failed Listen has nothing to stop.
         this.running = composition
         this.ownsDatabase = database === undefined
@@ -439,6 +458,7 @@ export class TenantAdminServer
         // their status before it rolls the components onto the release (one target failing is logged, never fatal).
         await composition.preparer?.PrepareAll(tenantId)
             .catch(err => log(TenantAdminServer.PrepareFailed + (err instanceof Error ? err.message : String(err))))
+        composition.preparation?.Start(tenantId)
         await composition.advert?.Start()
         return composition
     }
@@ -459,6 +479,10 @@ export class TenantAdminServer
         }
         composition.advert?.Stop()
         await composition.advert?.Idle()
+        composition.selfApply?.Stop()
+        await composition.preparation?.Stop()
+        await this.selfReadiness
+        this.selfReadiness = undefined
         try
         {
             await composition.host.Close()
@@ -525,6 +549,14 @@ export class TenantAdminServer
     }
 
     private static readonly SettleFailed = 'settling the console\'s own configuration apply failed: '
+    private static readonly SelfApplyPrefix = '[configuration] the console\'s own apply: '
+
+    // Logs a failure and answers nothing (a settle that failed leaves nothing to watch).
+    private static Logged(log: (line: string) => void, prefix: string, err: unknown): undefined
+    {
+        log(prefix + (err instanceof Error ? err.message : String(err)))
+        return undefined
+    }
     private static readonly PrepareFailed = 'preparing the configurations for this release failed: '
 
     private static Required(env: NodeJS.ProcessEnv, name: string): string

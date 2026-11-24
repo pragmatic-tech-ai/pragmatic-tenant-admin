@@ -59,18 +59,17 @@ class ExitRecorder implements IStartProcess
 
 describe('the console reads its configuration at start', () =>
 {
-    const Core = { fingerprintKey: 'secret:file/fp-key', port: 7443, baseDomain: 'configured.test', secureCookie: true }
+    const Core = { healthProbeMs: 45000, secretTtlHours: 24 }
 
     it('a mounted configuration overrides the declared variable before the settings are read', async () =>
     {
         await StartWorld.InFolder(async folder =>
         {
             const env = StartWorld.Env(await StartWorld.Configuration(folder, Core))
-            await writeFile(join(folder, 'fp-key'), 'fingerprint')
             await ComponentStartConfiguration.Apply({ Declaration: TenantAdminComponent.Declaration, Env: env, Stores: ComponentStartConfiguration.Stores('', folder), SecretsDir: join(folder, 'run') })
             const config = TenantAdminServer.ReadConfig(env)
-            assert.deepEqual([config.dataRoot, config.port, config.baseDomain, config.secureCookie], ['/data', 7443, 'configured.test', true], 'the state folder stays the deployment own')
-            assert.equal(env.PRAGMATIC_TENANT_ADMIN_FINGERPRINT_KEY_FILE, join(folder, 'run', 'core.fingerprintKey'))
+            assert.deepEqual([config.probeMs, config.secretTtlHours], [45000, 24])
+            assert.deepEqual([config.dataRoot, config.port, config.baseDomain], ['/data', 7100, 'env.test'], 'the state folder and the wiring stay the deployment own')
         })
     })
 
@@ -87,10 +86,10 @@ describe('the console reads its configuration at start', () =>
         await StartWorld.InFolder(async folder =>
         {
             const process = new ExitRecorder()
-            const env = StartWorld.Env(await StartWorld.Configuration(folder, { port: 'not-a-port' }))
+            const env = StartWorld.Env(await StartWorld.Configuration(folder, { healthProbeMs: 'not-a-number' }))
             await assert.rejects(ComponentStartConfiguration.ApplyOrExit({ Declaration: TenantAdminComponent.Declaration, Env: env }, process))
             assert.equal(process.Code, 78)
-            assert.match(process.Text, /pragmatic-tenant-admin: .*port.*\(invalid\)/, 'the refusal names the one setting that is wrong')
+            assert.match(process.Text, /pragmatic-tenant-admin: .*healthProbeMs.*\(invalid\)/, 'the refusal names the one setting that is wrong')
         })
     })
 
@@ -103,10 +102,12 @@ describe('the console reads its configuration at start', () =>
         assert.deepEqual(lists, [], 'the console declares no list setting; its one list variable (releases) is platform-owned')
     })
 
-    it('platform-owned settings are not configurable: the rollout link, the injected IdP and the release trust roots', () =>
+    it('platform-owned settings are not configurable: the rollout link, the injected IdP, the release trust roots and the console wiring', () =>
     {
         const names = TenantAdminComponent.Descriptor().Options.flatMap(o => o.Settings.map(s => `${o.Name}.${s.Name}`))
-        for (const owned of ['rollout.url', 'rollout.token', 'idp.adminToken', 'core.releaseKeysDir', 'core.releaseRegistry', 'core.descriptorsDir'])
+        for (const owned of ['rollout.url', 'rollout.token', 'idp.adminToken', 'core.releaseKeysDir', 'core.releaseRegistry', 'core.descriptorsDir',
+            'core.port', 'core.bind', 'core.baseDomain', 'core.consoleHost', 'core.externalScheme', 'core.externalPort', 'core.trustedProxy', 'core.portalDir',
+            'core.fingerprintKey', 'core.secureCookie', 'ingressTls.source', 'ingressTls.secretName', 'ingressTls.clusterIssuer'])
         {
             assert.ok(!names.includes(owned), owned)
         }

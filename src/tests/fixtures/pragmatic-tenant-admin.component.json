@@ -1,72 +1,12 @@
 {
   "schema": 1,
   "component": "pragmatic-tenant-admin",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "options": [
     {
       "name": "core",
-      "description": "The tenant console: listener, state folder and tenant origins.",
+      "description": "The tenant console: issued secrets, environment health probes and desktop sign-in.",
       "settings": [
-        {
-          "name": "portalDir",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_PORTAL_DIR: The tenant portal bundle (defaults to the shipped admin/tenant-portal/dist)."
-        },
-        {
-          "name": "port",
-          "type": "integer",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_PORT: Port of the tenant listener."
-        },
-        {
-          "name": "baseDomain",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_BASE_DOMAIN: Tenants are served at <tenant>.<baseDomain>."
-        },
-        {
-          "name": "bind",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "default": "127.0.0.1",
-          "description": "PRAGMATIC_TENANT_ADMIN_BIND: Address of the tenant listener."
-        },
-        {
-          "name": "externalScheme",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "default": "https",
-          "description": "PRAGMATIC_TENANT_ADMIN_EXTERNAL_SCHEME: Scheme browsers use for tenant origins."
-        },
-        {
-          "name": "externalPort",
-          "type": "integer",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_EXTERNAL_PORT: Port browsers use for tenant origins, when not the scheme default."
-        },
-        {
-          "name": "secureCookie",
-          "type": "boolean",
-          "required": false,
-          "secret": false,
-          "default": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_SECURE_COOKIE: Whether session cookies are Secure."
-        },
-        {
-          "name": "trustedProxy",
-          "type": "boolean",
-          "required": false,
-          "secret": false,
-          "default": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_TRUSTED_PROXY: Whether the tenant listener sits behind a trusted proxy."
-        },
         {
           "name": "secretTtlHours",
           "type": "integer",
@@ -92,52 +32,11 @@
           "description": "PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_TIMEOUT_MS: Timeout of one environment health probe, in milliseconds."
         },
         {
-          "name": "consoleHost",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_CONSOLE_HOST: Browser host the console is served on through its Ingress."
-        },
-        {
           "name": "desktopRealmSignIn",
           "type": "boolean",
           "required": false,
           "secret": false,
           "description": "PRAGMATIC_TENANT_ADMIN_DESKTOP_REALM_SIGN_IN: Whether desktop apps sign in through the realm (unset keeps the default of the console: on when the realm sign-in service is co-hosted)."
-        },
-        {
-          "name": "fingerprintKey",
-          "type": "string",
-          "required": false,
-          "secret": true,
-          "description": "PRAGMATIC_TENANT_ADMIN_FINGERPRINT_KEY_FILE: The account-email fingerprint key (a mounted secret file)."
-        }
-      ]
-    },
-    {
-      "name": "ingressTls",
-      "description": "TLS of the environment and IdP Ingresses this console renders.",
-      "settings": [
-        {
-          "name": "source",
-          "type": "string",
-          "required": true,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_INGRESS_TLS_SOURCE: existing-secret, cert-manager or development."
-        },
-        {
-          "name": "secretName",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_INGRESS_TLS_SECRET: The TLS Secret (for existing-secret)."
-        },
-        {
-          "name": "clusterIssuer",
-          "type": "string",
-          "required": false,
-          "secret": false,
-          "description": "PRAGMATIC_TENANT_ADMIN_INGRESS_TLS_ISSUER: The cert-manager ClusterIssuer (for cert-manager)."
         }
       ]
     }

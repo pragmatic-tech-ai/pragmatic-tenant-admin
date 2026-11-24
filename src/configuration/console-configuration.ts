@@ -20,11 +20,11 @@ export interface IEnvironmentList
 }
 
 /** The namespaces the console configures workloads in: its tenant's hive-bound environments', pragmatic-system and its
- *  realm sign-in service's. */
+ *  realm sign-in service's. The UI unpacker is not configured (every setting it reads is deployment wiring, injected per
+ *  environment and app), so no Deployment is its target. */
 export class ConsoleConfiguredNamespaces implements IConfiguredNamespaces
 {
     private static readonly EnvServer: string = ReleaseApp.EnvServer
-    private static readonly UiUnpack: string = ReleaseApp.UiUnpack
     private static readonly HiveAgent: string = ReleaseApp.HiveAgent
     private static readonly TenantAdmin: string = ReleaseApp.TenantAdmin
     private static readonly TenantIdp: string = ReleaseApp.TenantIdp
@@ -58,7 +58,6 @@ export class ConsoleConfiguredNamespaces implements IConfiguredNamespaces
         switch (component)
         {
             case ConsoleConfiguredNamespaces.EnvServer:
-            case ConsoleConfiguredNamespaces.UiUnpack:
                 return environment !== undefined && ConsoleConfiguredNamespaces.NamespaceOf(environment)[0] === namespace && deployment === B.ServerDeploymentOf(environment)
             case ConsoleConfiguredNamespaces.HiveAgent:
                 return namespace === B.SystemNamespace && deployment === B.HiveAgentNameOf(this.Hive)
@@ -94,10 +93,12 @@ export class NoConfigurationTargets implements IConfigurationTargetSource
     }
 }
 
-/** The console's configuration service and the preparer it runs at start (undefined outside a cluster). */
+/** The console's configuration service, the preparer it runs at start and the console as its own target (both undefined
+ *  outside a cluster). The one ConsoleSelfApply is shared by the applier and the start, so an apply to the console waits
+ *  until the console its own apply started is proven. */
 export class ComposedConsoleConfiguration
 {
-    public constructor(public readonly Service: ConfigurationService, public readonly Preparer: ConfigurationPreparer | undefined)
+    public constructor(public readonly Service: ConfigurationService, public readonly Preparer: ConfigurationPreparer | undefined, public readonly Self: ConsoleSelfApply | undefined = undefined)
     {
         Object.freeze(this)
     }
@@ -154,8 +155,9 @@ export class ConsoleConfiguration
         // One lock for every write of a configuration object: the applier's and the preparer's never interleave.
         const lock = new ConfigMapWriteLock()
         const preparer = new ConfigurationPreparer(parts.Client, parts.Repository, catalogue, targets, lock, log)
-        const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, C.SelfOf(parts.Client, parts.TenantId, parts.HiveId), lock, preparer)
-        return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, targets, applier, new ComponentSecretWriter(parts.Client), preparer), preparer)
+        const self = C.SelfOf(parts.Client, parts.TenantId, parts.HiveId)
+        const applier = new KubeConfigurationApplier(parts.Client, new RolloutWatch(parts.Client), KubeConfigurationApplier.RolloutTimeoutMs, self, lock, preparer)
+        return new ComposedConsoleConfiguration(new ConfigurationService(parts.Repository, catalogue, targets, applier, new ComponentSecretWriter(parts.Client), preparer), preparer, self)
     }
 
     /** The console's own Deployment, as its configuration target. */

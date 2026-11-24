@@ -31,15 +31,16 @@ export enum RolloutState
 type DeploymentStatusShape = {
     metadata?: { generation?: unknown }
     spec?: { replicas?: unknown }
-    status?: { observedGeneration?: unknown; replicas?: unknown; updatedReplicas?: unknown; readyReplicas?: unknown }
+    status?: { observedGeneration?: unknown; replicas?: unknown; updatedReplicas?: unknown; availableReplicas?: unknown }
 }
 
 /**
  * Waits for a Deployment's roll: ready once the controller has seen the newest template (observedGeneration at least
- * generation), every desired replica runs it (updatedReplicas) and that many updated pods are ready. Ready pods are
- * counted without the old ones still running (readyReplicas minus replicas not updated), so a roll whose new pod never
- * becomes ready is never taken for ready while the old pod keeps serving (maxUnavailable 0). A read that fails counts as
- * not ready yet; the deadline decides.
+ * generation), every desired replica runs it (updatedReplicas) and that many updated pods are available. Available pods
+ * are counted without the old ones still running (availableReplicas minus replicas not updated), so a roll whose new pod
+ * never becomes ready is never taken for ready while the old pod keeps serving (maxUnavailable 0). Available, not ready:
+ * a surge-rolled workload waits `minReadySeconds` before a ready pod counts as available, so a pod ready for a moment
+ * before it exits is not taken for a finished roll. A read that fails counts as not ready yet; the deadline decides.
  */
 export class RolloutWatch
 {
@@ -68,7 +69,7 @@ export class RolloutWatch
         }
     }
 
-    /** Whether the Deployment's newest template runs on every desired replica, all of them ready. */
+    /** Whether the Deployment's newest template runs on every desired replica, all of them available. */
     public static IsReady(deployment: DeploymentStatusShape): boolean
     {
         const W = RolloutWatch
@@ -77,9 +78,9 @@ export class RolloutWatch
         const desired = deployment.spec?.replicas === undefined ? W.DefaultReplicas : W.Count(deployment.spec.replicas)
         const replicas = W.Count(deployment.status?.replicas)
         const updated = W.Count(deployment.status?.updatedReplicas)
-        const ready = W.Count(deployment.status?.readyReplicas)
+        const available = W.Count(deployment.status?.availableReplicas)
         const old = Math.max(replicas - updated, 0)
-        return observed >= generation && updated >= desired && ready - old >= desired
+        return observed >= generation && updated >= desired && available - old >= desired
     }
 
     private static Count(value: unknown): number

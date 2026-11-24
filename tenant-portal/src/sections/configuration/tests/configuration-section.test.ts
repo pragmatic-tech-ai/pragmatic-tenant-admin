@@ -10,6 +10,7 @@ import { ConfigurationSectionService } from '../configuration-section-service.js
 import { ConfigurationPageViewModel, type IConfigurationNavigator } from '../configuration-page-view-model.js'
 import { ComponentConfigurationPageViewModel } from '../component-configuration-page-view-model.js'
 import { ConfigurationEditorViewModel } from '../configuration-editor-view-model.js'
+import { ConfigurationTargetRowViewModel } from '../configuration-rows.js'
 
 class RecordingNavigator implements IConfigurationNavigator
 {
@@ -365,5 +366,24 @@ describe('ConfigurationSectionService', () =>
         detail.BackCommand.Execute()
         await Tick.Settle()
         assert.ok(content() instanceof ConfigurationPageViewModel)
+    })
+})
+
+describe('Configuration target text', () =>
+{
+    const target = { environment: 'pragmatic-idp-t1', hive: 'h1', namespace: 'pragmatic-idp-t1', deployment: 'pragmatic-idp-t1', applied: 3 }
+
+    it('says which prepared entry the pods run when it is not the applied file', () =>
+    {
+        const row = new ConfigurationTargetRowViewModel({ ...target, runs: { version: 2, componentVersion: '0.2.5', appliedVersion: 3 } })
+        assert.equal(row.AppliedText, 'Version 3 applied; runs version 2 (prepared for 0.2.5)')
+        assert.equal(new ConfigurationTargetRowViewModel({ ...target, runs: null }).AppliedText, 'Version 3 applied')
+    })
+
+    it('says a target runs a version that reads no configuration, so nothing applied there would change it', () =>
+    {
+        const row = new ConfigurationTargetRowViewModel({ ...target, applied: null, componentVersion: '0.1.0', readsConfiguration: false })
+        assert.equal(row.AppliedText, 'Runs 0.1.0, which reads no configuration: update it before applying one')
+        assert.equal(new ConfigurationTargetRowViewModel({ ...target, readsConfiguration: true }).AppliedText, 'Version 3 applied')
     })
 })

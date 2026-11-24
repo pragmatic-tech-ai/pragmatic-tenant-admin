@@ -410,8 +410,22 @@ export interface ConnectionStatus
 // The configuration repository (/tenant-api/configuration/), mirrored by hand from the server. A version number is
 // 1-based; 0 names the empty document (a diff's "from" before the first version). Secret settings hold secret
 // references (`secret:<store>/<name>`), never values.
-// One target: its environment (or namespace), where it is, the component version its image runs when known, what is applied.
-export type ConfigurationTargetDto = { environment: string; hive: string; namespace: string; deployment: string; componentVersion?: string | null; descriptorDigest?: string | null; applied: number | null }
+// One target: its environment (or namespace), where it is, the component version its image runs when known, whether that
+// reads its configuration at start, what is applied, and the prepared entry its pods run when it is not the applied file.
+export type ConfigurationTargetDto = {
+    environment: string
+    hive: string
+    namespace: string
+    deployment: string
+    componentVersion?: string | null
+    descriptorDigest?: string | null
+    readsConfiguration?: boolean
+    applied: number | null
+    runs?: ConfigurationRunsDto | null
+}
+
+// The prepared entry a target's pods run: its version, the component version it was prepared for, the applied file's version.
+export type ConfigurationRunsDto = { version: number; componentVersion: string; appliedVersion: number }
 
 export type ConfigurationComponentDto = {
     component: string

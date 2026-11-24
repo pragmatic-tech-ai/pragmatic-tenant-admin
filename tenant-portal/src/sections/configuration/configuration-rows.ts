@@ -12,10 +12,31 @@ export class ConfigurationText
     private static readonly VersionPrefix = 'Version '
     private static readonly NoText = ''
     private static readonly JsonIndent = 2
+    private static readonly RunsPrefix = '; runs version '
+    private static readonly PreparedFor = ' (prepared for '
+    private static readonly PreparedClose = ')'
+    private static readonly ReadsNonePrefix = 'Runs '
+    private static readonly ReadsNoneUnknown = 'a version'
+    private static readonly ReadsNoneSuffix = ', which reads no configuration: update it before applying one'
 
     public static Version(version: number): string
     {
         return ConfigurationText.VersionPrefix + String(version)
+    }
+
+    // What the target's pods run when it is a prepared entry, after what is applied: "; runs version 2 (prepared for 0.2.5)".
+    public static RunsNote(target: ConfigurationTargetDto): string
+    {
+        const T = ConfigurationText
+        const runs = target.runs
+        return runs === undefined || runs === null ? T.NoText : T.RunsPrefix + String(runs.version) + T.PreparedFor + runs.componentVersion + T.PreparedClose
+    }
+
+    // A target whose image reads no configuration at start; undefined for one that reads it.
+    public static ReadsNone(target: ConfigurationTargetDto): string | undefined
+    {
+        const T = ConfigurationText
+        return target.readsConfiguration === false ? T.ReadsNonePrefix + (target.componentVersion ?? T.ReadsNoneUnknown) + T.ReadsNoneSuffix : undefined
     }
 
     // A setting's value as JSON (a string keeps its quotes, so "10" and 10 read apart); '' when absent.
@@ -147,9 +168,10 @@ export class ConfigurationTargetRowViewModel extends Observable
 
     public get AppliedText(): string
     {
-        return this.target.applied === null
+        const applied = this.target.applied === null
             ? ConfigurationTargetRowViewModel.NothingApplied
             : ConfigurationText.Version(this.target.applied) + ConfigurationTargetRowViewModel.AppliedSuffix
+        return ConfigurationText.ReadsNone(this.target) ?? applied + ConfigurationText.RunsNote(this.target)
     }
 }
 

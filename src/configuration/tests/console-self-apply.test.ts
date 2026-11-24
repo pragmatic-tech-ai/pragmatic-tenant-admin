@@ -24,10 +24,10 @@ class SelfWorld
     public static readonly ConfigMapPath = '/api/v1/namespaces/pragmatic-system/configmaps/pragmatic-config-pragmatic-tenant-admin'
     public static readonly Self = new ApplyTarget('h1', 'pragmatic-system', SelfWorld.Deployment)
 
-    public static Applied(version: number, port: number): AppliedConfiguration
+    public static Applied(version: number, probeMs: number): AppliedConfiguration
     {
         const d = TenantAdminComponent.Descriptor()
-        return new AppliedConfiguration('acme', d.Name, version, d.Version, d.ContentDigest(), { options: { core: { port } } })
+        return new AppliedConfiguration('acme', d.Name, version, d.Version, d.ContentDigest(), { options: { core: { healthProbeMs: probeMs } } })
     }
 
     public static Cluster(running: AppliedConfiguration): FakeCluster
@@ -42,9 +42,12 @@ class SelfWorld
         return cluster
     }
 
+    /** The console's own apply, on a fake clock that starts now (its applies are requested at the wall clock). */
     public static SelfApply(cluster: FakeCluster): ConsoleSelfApply
     {
-        return new ConsoleSelfApply(new KubeApiClient(cluster), SelfWorld.Self, TenantAdminComponent.Name)
+        const clock = new FakeClock()
+        clock.Current = Date.now()
+        return new ConsoleSelfApply(new KubeApiClient(cluster), SelfWorld.Self, TenantAdminComponent.Name, clock)
     }
 
     public static RunningHash(cluster: FakeCluster): string | undefined
@@ -71,7 +74,7 @@ describe('ConsoleSelfApply', () =>
     it('a configuration the console applies to itself keeps what ran before beside it; a refused start puts it back', async () =>
     {
         const W = SelfWorld
-        const good = W.Applied(1, 7100)
+        const good = W.Applied(1, 30000)
         const bad = W.Applied(2, 1)
         const cluster = W.Cluster(good)
         const client = new KubeApiClient(cluster)
@@ -105,26 +108,29 @@ describe('ConsoleSelfApply', () =>
 
     it('a console that runs without anything to put back does nothing', async () =>
     {
-        const cluster = SelfWorld.Cluster(SelfWorld.Applied(1, 7100))
+        const cluster = SelfWorld.Cluster(SelfWorld.Applied(1, 30000))
         assert.equal(await SelfWorld.SelfApply(cluster).Revert(), false)
     })
 
-    it('settles its own pending apply: applied when it runs that version, else rollout-not-ready', async () =>
+    it('settles its own pending apply: applied once the console it runs is proven ready, else rollout-not-ready', async () =>
     {
         const W = SelfWorld
         const repository = new InMemoryConfigurationRepository()
         const scope = new ConfigurationScope('acme', TenantAdminComponent.Name)
         const d = TenantAdminComponent.Descriptor()
-        for (const source of ['cert-manager', 'development'])
+        for (const probeMs of [30000, 45000])
         {
             const head = await repository.Head(scope)
-            await repository.Save(new ConfigurationSaveRequest(scope, head === null ? 0 : head.Number, { options: { ingressTls: { source } } }, d, 'a', ''))
+            await repository.Save(new ConfigurationSaveRequest(scope, head === null ? 0 : head.Number, { options: { core: { healthProbeMs: probeMs } } }, d, 'a', ''))
         }
         const two = await repository.BeginApply(new ApplyRequest(scope, 2, W.Self, 'a'))
-        await W.SelfApply(W.Cluster(W.Applied(2, 7200))).Settle(repository, 'acme')
+        const self = W.SelfApply(W.Cluster(W.Applied(2, 45000)))
+        const awaiting = await self.Settle(repository, 'acme')
+        assert.equal((await repository.Applies(scope)).find(a => a.Id === two.Id)?.Outcome, ApplyOutcome.Pending, 'never Applied before readiness')
+        await self.AwaitReady(repository, 'acme', awaiting!)
         assert.equal((await repository.Applies(scope)).find(a => a.Id === two.Id)?.Outcome, ApplyOutcome.Applied)
         const again = await repository.BeginApply(new ApplyRequest(scope, 2, W.Self, 'a'))
-        await W.SelfApply(W.Cluster(W.Applied(1, 7100))).Settle(repository, 'acme')
+        await W.SelfApply(W.Cluster(W.Applied(1, 30000))).Settle(repository, 'acme')
         const settled = (await repository.Applies(scope)).find(a => a.Id === again.Id)
         assert.deepEqual([settled?.Outcome, settled?.Detail], [ApplyOutcome.Failed, ConfigurationService.RolloutNotReadyDetail])
     })
@@ -135,18 +141,20 @@ describe('ConsoleSelfApply', () =>
         const repository = new InMemoryConfigurationRepository()
         const scope = new ConfigurationScope('acme', TenantAdminComponent.Name)
         const d = TenantAdminComponent.Descriptor()
-        for (const source of ['cert-manager', 'development'])
+        for (const probeMs of [30000, 45000])
         {
             const head = await repository.Head(scope)
-            await repository.Save(new ConfigurationSaveRequest(scope, head === null ? 0 : head.Number, { options: { ingressTls: { source } } }, d, 'a', ''))
+            await repository.Save(new ConfigurationSaveRequest(scope, head === null ? 0 : head.Number, { options: { core: { healthProbeMs: probeMs } } }, d, 'a', ''))
         }
         const older = await repository.BeginApply(new ApplyRequest(scope, 1, W.Self, 'a'))
         const newest = await repository.BeginApply(new ApplyRequest(scope, 2, W.Self, 'a'))
-        const cluster = W.Cluster(W.Applied(2, 7200))
+        const cluster = W.Cluster(W.Applied(2, 45000))
         const map = cluster.Objects.get(W.ConfigMapPath)!
         map.data['previous.json'] = 'x'
         map.metadata.annotations['pragmatic-tech.ai/previous-configuration-hash'] = 'sha256:old'
-        await W.SelfApply(cluster).Settle(repository, 'acme')
+        const self = W.SelfApply(cluster)
+        assert.equal(cluster.Objects.get(W.ConfigMapPath)!.data['previous.json'], 'x')
+        await self.AwaitReady(repository, 'acme', (await self.Settle(repository, 'acme'))!)
         const applies = await repository.Applies(scope)
         assert.deepEqual([applies.find(a => a.Id === older.Id)?.Detail, applies.find(a => a.Id === newest.Id)?.Outcome], [ConsoleSelfApply.SupersededDetail, ApplyOutcome.Applied])
         const after = cluster.Objects.get(W.ConfigMapPath)!
@@ -166,16 +174,18 @@ class FailingCompletion extends InMemoryConfigurationRepository
 
 describe('ConsoleSelfApply settling under failure and interruption', () =>
 {
-    it('forgets what it kept even when completing the apply fails, so a later refusal cannot undo a good apply', async () =>
+    it('forgets what it kept even when completing the proven apply fails, so a later refusal cannot undo a good apply', async () =>
     {
         const W = SelfWorld
         const repository = new FailingCompletion()
         const scope = new ConfigurationScope('acme', TenantAdminComponent.Name)
-        await repository.Save(new ConfigurationSaveRequest(scope, 0, { options: { ingressTls: { source: 'development' } } }, TenantAdminComponent.Descriptor(), 'a', ''))
+        await repository.Save(new ConfigurationSaveRequest(scope, 0, { options: { core: { healthProbeMs: 30000 } } }, TenantAdminComponent.Descriptor(), 'a', ''))
         await repository.BeginApply(new ApplyRequest(scope, 1, W.Self, 'a'))
-        const cluster = W.Cluster(W.Applied(1, 7100))
+        const cluster = W.Cluster(W.Applied(1, 30000))
         cluster.Objects.get(W.ConfigMapPath)!.data['previous.json'] = 'x'
-        await assert.rejects(W.SelfApply(cluster).Settle(repository, 'acme'), /repository is down/)
+        const self = W.SelfApply(cluster)
+        const awaiting = await self.Settle(repository, 'acme')
+        await assert.rejects(self.AwaitReady(repository, 'acme', awaiting!), /repository is down/)
         assert.equal(cluster.Objects.get(W.ConfigMapPath)!.data['previous.json'], undefined)
         assert.equal(await W.SelfApply(cluster).Revert(), false)
     })
@@ -187,10 +197,10 @@ describe('ConsoleSelfApply settling under failure and interruption', () =>
         const agent = new ConfigurationScope('acme', 'pragmatic-hive-agent')
         const own = new ConfigurationScope('acme', TenantAdminComponent.Name)
         await repository.Save(new ConfigurationSaveRequest(agent, 0, { options: { core: { pollIntervalMs: 15000 } } }, ConfigurationFixture.Agent010(), 'a', ''))
-        await repository.Save(new ConfigurationSaveRequest(own, 0, { options: { ingressTls: { source: 'development' } } }, TenantAdminComponent.Descriptor(), 'a', ''))
+        await repository.Save(new ConfigurationSaveRequest(own, 0, { options: { core: { healthProbeMs: 30000 } } }, TenantAdminComponent.Descriptor(), 'a', ''))
         const other = await repository.BeginApply(new ApplyRequest(agent, 1, new ApplyTarget('h1', 'pragmatic-system', 'pragmatic-hive-agent-h1'), 'a'))
         const mine = await repository.BeginApply(new ApplyRequest(own, 1, W.Self, 'a'))
-        await W.SelfApply(W.Cluster(W.Applied(1, 7100))).SettleInterrupted(repository, 'acme', ['pragmatic-hive-agent', TenantAdminComponent.Name])
+        await W.SelfApply(W.Cluster(W.Applied(1, 30000))).SettleInterrupted(repository, 'acme', ['pragmatic-hive-agent', TenantAdminComponent.Name])
         const settled = (await repository.Applies(agent)).find(a => a.Id === other.Id)
         assert.deepEqual([settled?.Outcome, settled?.Detail], [ApplyOutcome.Failed, ConsoleSelfApply.InterruptedDetail])
         assert.equal((await repository.Applies(own)).find(a => a.Id === mine.Id)?.Outcome, ApplyOutcome.Pending)
@@ -250,7 +260,7 @@ describe('ConsoleSelfApply and prepared entries', () =>
     it('putting back what ran before keeps the entries prepared for the next release', async () =>
     {
         const W = SelfWorld
-        const good = W.Applied(1, 7100)
+        const good = W.Applied(1, 30000)
         const bad = W.Applied(2, 1)
         const cluster = W.Cluster(good)
         const client = new KubeApiClient(cluster)
@@ -277,23 +287,46 @@ describe('ConsoleSelfApply and prepared entries', () =>
         try
         {
             const own = TenantAdminComponent.Descriptor()
-            const applied = new AppliedConfiguration('acme', own.Name, 3, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 7443 } } })
+            const applied = new AppliedConfiguration('acme', own.Name, 3, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { healthProbeMs: 7443 } } })
             const path = join(folder, 'configuration.json')
             await writeFile(path, applied.ToCanonicalJson())
             const env: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path }
-            const port = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, new ExitRecorder())
-            assert.equal(port, '7443', 'the re-validated document was overlaid')
+            const probe = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env, e => e.PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS, undefined, new ExitRecorder())
+            assert.equal(probe, '7443', 'the re-validated document was overlaid')
             // A retired setting is left behind and said; a document that does not carry over is ignored, not fatal.
-            await writeFile(path, new AppliedConfiguration('acme', own.Name, 4, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 7443, retired: 'x' } } }).ToCanonicalJson())
+            await writeFile(path, new AppliedConfiguration('acme', own.Name, 4, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { healthProbeMs: 7443, retired: 'x' } } }).ToCanonicalJson())
             const said = new ExitRecorder()
-            assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, { PRAGMATIC_CONFIGURATION_FILE: path }, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, said), '7443')
+            assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, { PRAGMATIC_CONFIGURATION_FILE: path }, e => e.PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS, undefined, said), '7443')
             assert.match(said.Text, /leaving behind .*core\.retired/)
-            await writeFile(path, new AppliedConfiguration('acme', own.Name, 5, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 'not-a-port' } } }).ToCanonicalJson())
+            await writeFile(path, new AppliedConfiguration('acme', own.Name, 5, '0.0.1', `sha256:${'a'.repeat(64)}`, { options: { core: { healthProbeMs: 'not-a-number' } } }).ToCanonicalJson())
             const ignored = new ExitRecorder()
-            const env2: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path, PRAGMATIC_TENANT_ADMIN_PORT: '7100' }
-            assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env2, e => e.PRAGMATIC_TENANT_ADMIN_PORT, undefined, ignored), '7100')
+            const env2: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path, PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS: '30000' }
+            assert.equal(await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env2, e => e.PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS, undefined, ignored), '30000')
             assert.equal(ignored.Code, undefined, 'the console still starts')
-            assert.match(ignored.Text, /leaving behind .*core\.port/, 'a setting it refuses is left behind, the rest still applies')
+            assert.match(ignored.Text, /leaving behind .*core\.healthProbeMs/, 'a setting it refuses is left behind, the rest still applies')
+        }
+        finally
+        {
+            await rm(folder, { recursive: true, force: true })
+        }
+    })
+})
+
+describe('ConsoleSelfApply and the console wiring the platform owns', () =>
+{
+    it('a configuration of an earlier console that set its listener carries over without it: the port the manifest renders stays', async () =>
+    {
+        const folder = await mkdtemp(join(tmpdir(), 'console-wiring-'))
+        try
+        {
+            const own = TenantAdminComponent.Descriptor()
+            const path = join(folder, 'configuration.json')
+            await writeFile(path, new AppliedConfiguration('acme', own.Name, 2, '0.1.3', `sha256:${'a'.repeat(64)}`, { options: { core: { port: 8080, healthProbeMs: 45000 } } }).ToCanonicalJson())
+            const said = new ExitRecorder()
+            const env: NodeJS.ProcessEnv = { PRAGMATIC_CONFIGURATION_FILE: path, PRAGMATIC_TENANT_ADMIN_PORT: '7100' }
+            const read = await ConsoleStartFallback.Start(TenantAdminComponent.Declaration, env, e => [e.PRAGMATIC_TENANT_ADMIN_PORT, e.PRAGMATIC_TENANT_ADMIN_HEALTH_PROBE_MS], undefined, said)
+            assert.deepEqual(read, ['7100', '45000'])
+            assert.match(said.Text, /leaving behind .*core\.port/)
         }
         finally
         {

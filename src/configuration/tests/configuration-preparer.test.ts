@@ -9,6 +9,7 @@ import { KubeApiClient, KubeMethod } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ConfigurationPreparationOutcome, ConfigurationTarget, type IComponentDescriptorSource } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { ConfigMapWriteLock } from '../config-map-write-lock.js'
 import { ConfigurationPreparer, PreparationResult } from '../configuration-preparer.js'
+import { PreparationSchedule } from '../preparation-schedule.js'
 import { FixedTargets } from './configuration-fixture.js'
 import { FakeCluster } from './fake-cluster.js'
 
@@ -385,5 +386,84 @@ describe('ConfigurationPreparer', () =>
         const [row] = await other.For(W.Idp, [W.Target()])
         assert.equal(row.outcome, ConfigurationPreparationOutcome.Refused)
         assert.deepEqual(row.settings, ['core.databaseUrl'])
+    })
+})
+
+/** A timer the test fires by hand. */
+class ManualTimer
+{
+    public Tick: (() => void) | undefined
+    public IntervalMs: number | undefined
+    public Disposed = false
+
+    public Every(intervalMs: number, tick: () => void): { dispose(): void }
+    {
+        this.IntervalMs = intervalMs
+        this.Tick = tick
+        return { dispose: () => { this.Disposed = true } }
+    }
+}
+
+describe('ConfigurationPreparer after the release rolls a target (M1, M2)', () =>
+{
+    it('once the target runs the release entry, preparing again drops the entry of the descriptor it ran before', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const before = new AppliedConfiguration(W.Tenant, W.Idp, 2, '0.2.1', `sha256:${'8'.repeat(64)}`, W.Document as never)
+        cluster.Objects.set(W.ConfigMapPath, AppliedConfigurationEntries.With(W.Map(cluster) as never, before) as never)
+        // At the console's start the IdP ran an image without the label: what it runs is unknown, so nothing is dropped.
+        const targets = new FixedTargets(new Map([[W.Idp, [new ConfigurationTarget(W.Namespace, W.Target().Target, undefined, undefined)]]]))
+        const preparer = new ConfigurationPreparer(new KubeApiClient(cluster), new InMemoryConfigurationRepository(), W.Descriptors(), targets)
+        await preparer.PrepareAll(W.Tenant)
+        assert.deepEqual([...AppliedConfigurationEntries.Prepared(W.Map(cluster)).keys()].sort(), [before.DescriptorDigest, W.Idp024().ContentDigest()].sort())
+        // The platform's installer rolls the IdP onto the release: it now runs the release entry, and the schedule prepares again.
+        targets.Targets.set(W.Idp, [new ConfigurationTarget(W.Namespace, W.Target().Target, W.Idp024().ContentDigest(), '0.2.4')])
+        const timer = new ManualTimer()
+        const schedule = new PreparationSchedule(preparer, () => undefined, timer)
+        schedule.Start(W.Tenant)
+        assert.equal(timer.IntervalMs, PreparationSchedule.IntervalMs)
+        timer.Tick!()
+        await schedule.Stop()
+        assert.equal(timer.Disposed, true)
+        assert.deepEqual([...AppliedConfigurationEntries.Prepared(W.Map(cluster)).keys()], [W.Idp024().ContentDigest()], 'the stale entry went')
+        assert.equal(AppliedConfigurationCodec.FromConfigMap(W.Map(cluster)).Version, 3, 'the applied file is untouched')
+    })
+
+    it('a tick while a preparation still runs starts none; a failing one is logged by name and the schedule goes on', async () =>
+    {
+        let calls = 0
+        let release: () => void = () => undefined
+        const lines: string[] = []
+        const slow = { PrepareAll: (): Promise<unknown> => { calls += 1; return new Promise(resolve => { release = () => resolve(undefined) }) } }
+        const timer = new ManualTimer()
+        const schedule = new PreparationSchedule(slow, line => lines.push(line), timer)
+        schedule.Start('t1')
+        timer.Tick!()
+        timer.Tick!()
+        assert.equal(calls, 1)
+        release()
+        await schedule.Stop()
+        const failing = new PreparationSchedule({ PrepareAll: async () => { throw new Error('cluster down') } }, line => lines.push(line), timer)
+        failing.Start('t1')
+        timer.Tick!()
+        await failing.Stop()
+        assert.deepEqual(lines, ['[configuration] preparing again failed: cluster down'])
+    })
+
+    it('says which prepared entry the pods run when it is not the applied file, and nothing otherwise', async () =>
+    {
+        const W = PrepareWorld
+        const cluster = W.Cluster()
+        const repository = new InMemoryConfigurationRepository()
+        const preparer = W.Preparer(cluster, repository)
+        await preparer.PrepareAll(W.Tenant)
+        const head = await repository.Head(W.Scope())
+        const rolled = new ConfigurationTarget(W.Namespace, W.Target().Target, W.Idp024().ContentDigest(), '0.2.4')
+        assert.deepEqual(await preparer.Runs(W.Idp, rolled), { version: head!.Number, componentVersion: '0.2.4', appliedVersion: 3 })
+        assert.equal(await preparer.Runs(W.Idp, W.Target()), undefined, 'it runs the applied file')
+        assert.equal(await preparer.Runs(W.Idp, new ConfigurationTarget(W.Namespace, W.Target().Target, undefined, undefined)), undefined, 'what it runs is not known')
+        cluster.Objects.delete(W.ConfigMapPath)
+        assert.equal(await preparer.Runs(W.Idp, rolled), undefined, 'nothing applied')
     })
 })

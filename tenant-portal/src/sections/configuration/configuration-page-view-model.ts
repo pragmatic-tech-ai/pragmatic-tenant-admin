@@ -64,9 +64,10 @@ export class ConfigurationComponentRowViewModel extends Observable
 
     private static AppliedText(target: ConfigurationTargetDto): string
     {
-        return target.applied === null
+        const applied = target.applied === null
             ? ConfigurationComponentRowViewModel.NothingApplied
             : ConfigurationComponentRowViewModel.VersionWord + String(target.applied) + ConfigurationComponentRowViewModel.AppliedSuffix
+        return ConfigurationText.ReadsNone(target) ?? applied + ConfigurationText.RunsNote(target)
     }
 }
 

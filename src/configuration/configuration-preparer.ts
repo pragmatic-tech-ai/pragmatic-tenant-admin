@@ -6,8 +6,8 @@ import {
 } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import {
-    ConfigurationPreparationOutcome, ConfigurationTarget, type ConfigurationPreparationDto, type IComponentDescriptorSource, type IConfigurationPreparationSource,
-    type IConfigurationTargetSource,
+    ConfigurationPreparationOutcome, ConfigurationTarget, type ConfigurationPreparationDto, type ConfigurationRunsDto, type IComponentDescriptorSource,
+    type IConfigurationPreparationSource, type IConfigurationTargetSource,
 } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { ComponentVersionOrder } from './component-version-order.js'
 import { ConfigMapWriteLock } from './config-map-write-lock.js'
@@ -194,6 +194,30 @@ export class ConfigurationPreparer implements IConfigurationPreparationSource, I
             }
         }
         return out
+    }
+
+    /** The prepared entry `target`'s pods run: its running descriptor has one, and the applied file is for another (the
+     *  release rolled it onto its entry). Undefined when what it runs is not known, it runs the applied file, or nothing. */
+    public async Runs(component: string, target: ConfigurationTarget): Promise<ConfigurationRunsDto | undefined>
+    {
+        const P = ConfigurationPreparer
+        const digest = target.DescriptorDigest
+        if (digest === undefined) return undefined
+        let map: ConfigMapShape | undefined
+        let applied: AppliedConfiguration
+        try
+        {
+            map = await this.client.Get(P.PathOf(component, target)) as ConfigMapShape | undefined
+            if (typeof map?.data?.[AppliedConfigurationKeys.FileName] !== 'string') return undefined
+            applied = AppliedConfigurationCodec.FromConfigMap(map)
+        }
+        catch
+        {
+            return undefined
+        }
+        if (applied.DescriptorDigest === digest) return undefined
+        const entry = P.EntriesOf(map).get(digest)
+        return entry === undefined ? undefined : { version: entry.Version, componentVersion: entry.ComponentVersion, appliedVersion: applied.Version }
     }
 
     private async PrepareOne(tenantId: string, component: string, descriptor: ComponentDescriptor, target: ConfigurationTarget): Promise<PreparationReport>

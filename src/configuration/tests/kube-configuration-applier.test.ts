@@ -23,7 +23,7 @@ class ApplyWorld
     public static Applied(version: number, port: number): AppliedConfiguration
     {
         const descriptor = TenantAdminComponent.Descriptor()
-        return new AppliedConfiguration(F.Tenant, descriptor.Name, version, descriptor.Version, descriptor.ContentDigest(), { options: { core: { port, baseDomain: 'acme.test' } } })
+        return new AppliedConfiguration(F.Tenant, descriptor.Name, version, descriptor.Version, descriptor.ContentDigest(), { options: { core: { healthProbeMs: port, secretTtlHours: 24 } } })
     }
 
     public static Cluster(previous?: AppliedConfiguration): FakeCluster
@@ -53,7 +53,7 @@ class ApplyWorld
     public static PortOf(cluster: FakeCluster): number | undefined
     {
         const map = cluster.Objects.get(ApplyWorld.ConfigMapPath) as Obj | undefined
-        return map === undefined ? undefined : (AppliedConfigurationCodec.FromConfigMap(map as never).Document as Obj).options.core.port
+        return map === undefined ? undefined : (AppliedConfigurationCodec.FromConfigMap(map as never).Document as Obj).options.core.healthProbeMs
     }
 }
 
@@ -164,11 +164,11 @@ describe('RolloutWatch', () =>
 {
     it('counts only updated pods as ready: a ready old pod beside an unready new one is not ready', () =>
     {
-        const status = (replicas: number, updated: number, ready: number): Obj => ({ metadata: { generation: 2 }, spec: { replicas: 1 }, status: { observedGeneration: 2, replicas, updatedReplicas: updated, readyReplicas: ready } })
+        const status = (replicas: number, updated: number, ready: number): Obj => ({ metadata: { generation: 2 }, spec: { replicas: 1 }, status: { observedGeneration: 2, replicas, updatedReplicas: updated, availableReplicas: ready } })
         assert.equal(RolloutWatch.IsReady(status(2, 1, 1)), false)
         assert.equal(RolloutWatch.IsReady(status(2, 1, 2)), true)
         assert.equal(RolloutWatch.IsReady(status(1, 1, 1)), true)
-        assert.equal(RolloutWatch.IsReady({ ...status(1, 1, 1), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, readyReplicas: 1 } }), false, 'the controller has not seen the new template')
+        assert.equal(RolloutWatch.IsReady({ ...status(1, 1, 1), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 1 } }), false, 'the controller has not seen the new template')
     })
 
     it('polls until the deadline and answers not-ready', async () =>

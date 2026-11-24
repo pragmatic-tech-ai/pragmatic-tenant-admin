@@ -26,9 +26,10 @@ export interface IReleaseDescriptorReader
  */
 export class ReleaseDescriptorCatalogue implements IComponentDescriptorSource
 {
-    /** The components that run in a hive (the platform-side ones are configured by the platform, not a tenant). */
+    /** The components that run in a hive and a tenant configures (the platform-side ones are configured by the platform;
+     *  the UI unpacker reads deployment wiring only, injected per environment and app, so a tenant has nothing to set). */
     public static readonly HiveComponents: readonly string[] = [
-        ReleaseApp.EnvServer, ReleaseApp.EnvGateway, ReleaseApp.HiveAgent, ReleaseApp.TenantAdmin, ReleaseApp.TenantIdp, ReleaseApp.UiUnpack,
+        ReleaseApp.EnvServer, ReleaseApp.EnvGateway, ReleaseApp.HiveAgent, ReleaseApp.TenantAdmin, ReleaseApp.TenantIdp,
     ]
     public static readonly DefaultDirectory = '/etc/pragmatic/descriptors'
     private static readonly DigestsFile = 'digests.json'

@@ -72,6 +72,12 @@ export class KubeConfigurationApplier implements IConfigurationApplier
         return true
     }
 
+    /** The console's own Deployment while the console it restarted is still proving that apply (ConsoleSelfApply). */
+    public Busy(target: ApplyTarget): boolean
+    {
+        return this.self?.Is(target) === true && this.self.Proving
+    }
+
     public async Apply(applied: AppliedConfiguration, target: ApplyTarget): Promise<ConfigurationApplyResult>
     {
         const K = KubeConfigurationApplier

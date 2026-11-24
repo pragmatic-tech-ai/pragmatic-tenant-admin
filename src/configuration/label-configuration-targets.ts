@@ -1,6 +1,7 @@
 import { ApplyTarget } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeResourceCatalog, type KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { ComponentConfigurationMounts, ConfigurationTarget, type IConfigurationTargetSource } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
+import { ConfigurationReaders } from './configuration-readers.js'
 
 /** The descriptor digest the image a container runs carries (its `ai.pragmatic-tech.component.digest` label). */
 export interface IImageComponentDigests
@@ -42,8 +43,8 @@ type ContainerShape = { name?: unknown; image?: unknown }
  * A target is shown by its environment (the Deployment's `pragmatic/environment` label) or, for the hive's own
  * components, its namespace; when two targets would share a name, both are shown by their namespace. Only the Deployment
  * the console's manifests render for the component there counts (labels alone can be put on anything). Each carries the
- * descriptor digest of the image the component's container runs (read from the image's label) and the component version
- * that digest belongs to, when known. A namespace the console cannot list is skipped, never an error for the others.
+ * descriptor digest of the image the component's container runs (read from the image's label), the component version
+ * that digest belongs to, when known, and whether that version reads its configuration (ConfigurationReaders). A namespace the console cannot list is skipped, never an error for the others.
  */
 export class LabelConfigurationTargets implements IConfigurationTargetSource
 {
@@ -109,7 +110,7 @@ export class LabelConfigurationTargets implements IConfigurationTargetSource
     {
         const counts = new Map<string, number>()
         for (const t of targets) counts.set(t.Name, (counts.get(t.Name) ?? 0) + 1)
-        return targets.map(t => (counts.get(t.Name) ?? 0) > 1 ? new ConfigurationTarget(name(t), t.Target, t.DescriptorDigest, t.ComponentVersion) : t)
+        return targets.map(t => (counts.get(t.Name) ?? 0) > 1 ? new ConfigurationTarget(name(t), t.Target, t.DescriptorDigest, t.ComponentVersion, t.ReadsConfiguration) : t)
     }
 
     private async TargetOf(component: string, namespace: string, deployment: DeploymentShape): Promise<ConfigurationTarget | undefined>
@@ -132,7 +133,7 @@ export class LabelConfigurationTargets implements IConfigurationTargetSource
         const image = L.ImageOf(component, deployment)
         const digest = image === undefined ? undefined : await this.images.DigestOf(image).catch(() => undefined)
         const version = digest === undefined ? undefined : this.versions.VersionOf(component, digest)
-        return new ConfigurationTarget(environment ?? namespace, target, digest, version)
+        return new ConfigurationTarget(environment ?? namespace, target, digest, version, ConfigurationReaders.Reads(component, version))
     }
 
     private static ImageOf(component: string, deployment: DeploymentShape): string | undefined
