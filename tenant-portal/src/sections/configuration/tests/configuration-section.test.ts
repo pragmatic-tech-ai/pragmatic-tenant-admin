@@ -11,7 +11,7 @@ import { ConfigurationPageViewModel, type IConfigurationNavigator } from '../con
 import { ComponentConfigurationPageViewModel } from '../component-configuration-page-view-model.js'
 import { ConfigurationEditorViewModel } from '../configuration-editor-view-model.js'
 import { ConfigurationSettingRowViewModel, ConfigurationTargetRowViewModel } from '../configuration-rows.js'
-import type { IConfigurationApplyWait } from '../configuration-apply-wait.js'
+import { TimerConfigurationApplyWait, type IConfigurationApplyWait } from '../configuration-apply-wait.js'
 import type { ConfigurationApplyDto } from '../../../tenant-types.js'
 
 // A simulated clock: a delay passes at once and moves Now on; runs `OnWait` (the console coming back, the apply settling)
@@ -37,8 +37,11 @@ class InstantWait implements IConfigurationApplyWait
         this.OnWait(this.Waits)
     }
 
-    public Timeout(ms: number): Promise<void>
+    public Timeouts = 0
+
+    public Timeout(ms: number, _settled: Promise<unknown>): Promise<void>
     {
+        this.Timeouts++
         if (!this.TimeoutsFire) return new Promise<void>(() => undefined)
         this.Clock += ms
         return Promise.resolve()
@@ -440,8 +443,11 @@ describe('ComponentConfigurationPageViewModel', () =>
         const wait = new InstantWait()
         const page = await fx.Console(wait)
         fx.Api.FailOn.set('ApplyConfigurationVersion', new TypeError('Failed to fetch'))
-        wait.TimeoutsFire = true
-        wait.OnWait = () => fx.Api.HangNext.set('GetConfigurationComponent', 1)
+        wait.OnWait = () =>
+        {
+            wait.TimeoutsFire = true
+            fx.Api.HangNext.set('GetConfigurationComponent', 1)
+        }
         page.ApplyCommand.Execute()
         for (let i = 0; i < 20 && page.IsApplying; i++) await Tick.Settle()
         assert.equal(wait.Waits, 24, 'each try: 3 s apart plus a 10 s read, until 300 s have passed')
@@ -465,6 +471,28 @@ describe('ComponentConfigurationPageViewModel', () =>
         assert.equal(page.CommandErrorText, 'unknown version')
     })
 
+    it('the read before sending has its timeout too: a console that does not answer it is an error, nothing is sent', async () =>
+    {
+        const fx = new ConfigFixture()
+        const wait = new InstantWait()
+        const page = await fx.Console(wait)
+        wait.TimeoutsFire = true
+        fx.Api.HangNext.set('GetConfigurationComponent', 1)
+        page.ApplyCommand.Execute()
+        for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
+        assert.equal(page.CommandErrorText, 'The console did not answer; try the apply again.')
+        assert.equal(fx.Api.Calls.some(c => c[0] === 'ApplyConfigurationVersion'), false)
+        assert.equal(wait.Timeouts, 1)
+    })
+
+    it('the browser timer of a read is cleared once the read settles', async () =>
+    {
+        const timers = new TimerConfigurationApplyWait()
+        const fired = await Promise.race([timers.Timeout(20, Promise.resolve()).then(() => 'timeout'), timers.Delay(80).then(() => 'cleared')])
+        assert.equal(fired, 'cleared')
+        assert.equal(await Promise.race([timers.Timeout(5, new Promise(() => undefined)).then(() => 'timeout'), timers.Delay(80).then(() => 'late')]), 'timeout')
+    })
+
     it('leaving the page stops the wait: no more reads, no notice (review M2)', async () =>
     {
         const fx = new ConfigFixture()
@@ -476,7 +504,15 @@ describe('ComponentConfigurationPageViewModel', () =>
         for (let i = 0; i < 5 && page.IsApplying; i++) await Tick.Settle()
         assert.equal(wait.Waits, 2)
         assert.deepEqual([page.IsApplying, page.NoticeText, page.CommandErrorText], [false, '', ''])
+        const reads = fx.Api.Calls.filter(c => c[0] === 'GetConfigurationComponent').length
+        fx.SettleConsoleApply(ConfigurationApplyOutcome.Applied)
         page.OnShown()
+        await Tick.Settle()
+        assert.equal(fx.Api.Calls.filter(c => c[0] === 'GetConfigurationComponent').length, reads + 1, 'shown again: the applies are read again')
+        assert.deepEqual(page.ApplyRows.ToArray().map(r => r.OutcomeText), ['Applied'])
+        page.OnShown()
+        await Tick.Settle()
+        assert.equal(fx.Api.Calls.filter(c => c[0] === 'GetConfigurationComponent').length, reads + 1, 'an ordinary show reads nothing more')
     })
 
     it('an apply of the same version to the same target recorded before the click (another admin) is not taken for this one (review M3)', async () =>

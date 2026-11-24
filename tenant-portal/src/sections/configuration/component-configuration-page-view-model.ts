@@ -79,8 +79,7 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel imp
     private static readonly RestartDeadlineMs = 5 * 60 * 1000
     /** What the ingress answers while the console's pod is gone (bad gateway, unavailable, gateway timeout). */
     private static readonly DroppedStatuses: readonly number[] = [502, 503, 504]
-    /** An ingress with no backend at all answers 404 without the console's JSON error body. */
-    private static readonly NoBackendStatus = 404
+    private static readonly NoAnswerText = 'The console did not answer; try the apply again.'
     private static readonly RevertedPrefix = 'Version '
     private static readonly RevertedInfix = ' did not become ready on '
     private static readonly RevertedSuffix = ': the previous configuration is running again.'
@@ -155,9 +154,12 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel imp
         ShownPage.Register(this)
     }
 
+    // Shown again after a wait it stopped: the applies are read again (the restarted console has recorded the outcome).
     public OnShown(): void
     {
+        if (!this.hidden) return
         this.hidden = false
+        void this.Refresh()
     }
 
     // Leaving the page stops a wait for the restarted console: its outcome is in the applies when the page is opened again.
@@ -677,7 +679,16 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel imp
         const own = this.component === P.ConsoleComponent
         const deadline = this.wait.Now() + P.RestartDeadlineMs
         // The applies there are now, read just before sending: only one recorded after it can be this one.
-        const known = own ? new Set((await this.Session.Client.GetConfigurationComponent(this.component)).applies.map(a => a.id)) : new Set<string>()
+        let known = new Set<string>()
+        if (own)
+        {
+            const before = await this.ReadOrUnanswered()
+            if (before === undefined)
+            {
+                throw new Error(P.NoAnswerText)
+            }
+            known = new Set(before.applies.map(a => a.id))
+        }
         let record: ConfigurationApplyDto
         try
         {
@@ -722,10 +733,11 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel imp
     private async ReadOrUnanswered(): Promise<ConfigurationComponentDetailDto | undefined>
     {
         const P = ComponentConfigurationPageViewModel
-        const timedOut = this.wait.Timeout(P.RestartReadTimeoutMs).then(() => undefined)
+        const read = this.Session.Client.GetConfigurationComponent(this.component)
+        const timedOut = this.wait.Timeout(P.RestartReadTimeoutMs, read).then(() => undefined)
         try
         {
-            return await Promise.race([this.Session.Client.GetConfigurationComponent(this.component), timedOut])
+            return await Promise.race([read, timedOut])
         }
         catch (e)
         {
@@ -745,14 +757,14 @@ export class ComponentConfigurationPageViewModel extends TenantPageViewModel imp
         this.RaiseIfChanged(P.ApplyingTextProperty, oldText, this.ApplyingText)
     }
 
-    // A request the console's restart cut: the ingress's gateway answers (or its 404 without the console's JSON body, no
-    // backend at all), or no answer at all (fetch itself rejects with a TypeError; the client wraps nothing else in one: a
-    // body that does not parse is a SyntaxError, a refusal an ApiError).
+    // A request the console's restart cut: the ingress's gateway answers (or its 404 without the console's JSON body: no
+    // backend at all), or no answer at all (fetch itself rejects with a TypeError; every answer, even one whose body does
+    // not parse, becomes an ApiError, its Body undefined then).
     private static IsDropped(error: unknown): boolean
     {
         const P = ComponentConfigurationPageViewModel
         if (!(error instanceof ApiError)) return error instanceof TypeError
-        return P.DroppedStatuses.includes(error.Status) || (error.Status === P.NoBackendStatus && error.Body === undefined)
+        return P.DroppedStatuses.includes(error.Status) || (error.Status === ApiError.NotFoundStatus && error.Body === undefined)
     }
 
     private SetApplying(next: boolean): void

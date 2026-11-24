@@ -4,8 +4,8 @@ export interface IConfigurationApplyWait
 {
     Now(): number
     Delay(ms: number): Promise<void>
-    /** Resolves when one read has taken `ms` (it then counts as unanswered). */
-    Timeout(ms: number): Promise<void>
+    /** Resolves when the read `settled` follows has taken `ms` (it then counts as unanswered); never once it settles. */
+    Timeout(ms: number, settled: Promise<unknown>): Promise<void>
 }
 
 export class TimerConfigurationApplyWait implements IConfigurationApplyWait
@@ -20,8 +20,14 @@ export class TimerConfigurationApplyWait implements IConfigurationApplyWait
         return new Promise(resolve => { setTimeout(resolve, ms) })
     }
 
-    public Timeout(ms: number): Promise<void>
+    // The timer is cleared once the read settles, so no timer outlives its read.
+    public Timeout(ms: number, settled: Promise<unknown>): Promise<void>
     {
-        return this.Delay(ms)
+        return new Promise(resolve =>
+        {
+            const timer = setTimeout(resolve, ms)
+            const clear = (): void => { clearTimeout(timer) }
+            settled.then(clear, clear)
+        })
     }
 }
