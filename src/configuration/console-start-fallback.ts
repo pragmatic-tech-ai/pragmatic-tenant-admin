@@ -57,12 +57,10 @@ export class ConsoleStartFallback
         catch (error)
         {
             const reason = error instanceof Error ? error.message : String(error)
-            // The realm secrets home not answering is not the configuration's fault: nothing is put back.
-            const homeFailed = error instanceof ConfigurationStartError && error.Reason === ConfigurationStartReason.SecretsHomeUnavailable
             let note = F.NoNote
             try
             {
-                note = !homeFailed && revert !== undefined && await revert.Revert() ? F.ReasonSeparator + F.RevertedNote : F.NoNote
+                note = F.PutsBack(error) && revert !== undefined && await revert.Revert() ? F.ReasonSeparator + F.RevertedNote : F.NoNote
             }
             catch
             {
@@ -75,6 +73,13 @@ export class ConsoleStartFallback
             }
             throw error
         }
+    }
+
+    /** Whether a refused start puts the previous configuration back: not when the realm secrets home did not answer
+     *  (that is not the configuration's fault). */
+    public static PutsBack(error: unknown): boolean
+    {
+        return !(error instanceof ConfigurationStartError && error.Reason === ConfigurationStartReason.SecretsHomeUnavailable)
     }
 
     // A configuration of the console's previous version carried over or ignored is said on stderr (names only, never values).

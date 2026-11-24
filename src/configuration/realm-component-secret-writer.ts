@@ -18,7 +18,8 @@ export class RealmComponentSecretWriter implements IComponentSecretWriter
         private readonly writer: RealmSecretWriter,
         private readonly interim: IComponentSecretWriter,
         private readonly targets: IConfigurationTargetSource,
-        private readonly tenantId: string)
+        private readonly tenantId: string,
+        private readonly capable: RealmCapableComponents = RealmCapableComponents.Default)
     {
     }
 
@@ -35,7 +36,7 @@ export class RealmComponentSecretWriter implements IComponentSecretWriter
         return targets.length > 0 && targets.every(target =>
         {
             const found = known.find(entry => entry.Target.Equals(target))
-            return found !== undefined && RealmCapableComponents.Reads(component, found.ComponentVersion)
+            return found !== undefined && this.capable.Reads(component, found.ComponentVersion)
         })
     }
 }

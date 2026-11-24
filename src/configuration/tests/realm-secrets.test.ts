@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ComponentDescriptorBuilder, SettingType, type ComponentDescriptor } from '@pragmatic-tech-ai/pragmatic-component'
-import { ApplyTarget, InMemoryConfigurationRepository, type AppliedConfiguration } from '@pragmatic-tech-ai/pragmatic-configuration'
+import { ApplyTarget, ConfigurationStartError, ConfigurationStartReason, InMemoryConfigurationRepository, type AppliedConfiguration } from '@pragmatic-tech-ai/pragmatic-configuration'
 import { KubeApiClient } from '@pragmatic-tech-ai/pragmatic-kube'
 import { CloudSecretManagerSecretStore, type IRealmSecretStore } from '@pragmatic-tech-ai/pragmatic-realm-adapters'
 import { RealmSecretWriter } from '@pragmatic-tech-ai/pragmatic-configuration'
@@ -10,6 +10,8 @@ import { ComponentSecretWriter } from '../component-secret-writer.js'
 import { InterimSecretMigration, InterimSecretMigrationOutcome, type IConsoleSelfTarget } from '../interim-secret-migration.js'
 import { RealmCapableComponents } from '../realm-capable-components.js'
 import { RealmComponentSecretWriter } from '../realm-component-secret-writer.js'
+import { ConsoleStartFallback } from '../console-start-fallback.js'
+import { TenantAdminComponent } from '../../tenant-admin-component.js'
 import { FixedTargets } from './configuration-fixture.js'
 import { FakeCluster } from './fake-cluster.js'
 
@@ -29,12 +31,12 @@ class Descriptors implements IComponentDescriptorSource
 
     public Names(): readonly string[]
     {
-        return [Descriptors.Server, Descriptors.Idp]
+        return [TenantAdminComponent.Name, Descriptors.Server, Descriptors.Idp]
     }
 
     public Current(component: string): ComponentDescriptor
     {
-        return component === Descriptors.Server ? Descriptors.Of(component, '0.1.4') : Descriptors.Of(component, '0.2.8')
+        return component === Descriptors.Server ? Descriptors.Of(component, '0.1.4') : component === Descriptors.Idp ? Descriptors.Of(component, '0.2.8') : Descriptors.Of(component, '0.1.7')
     }
 
     public async For(component: string, version: string): Promise<ComponentDescriptor>
@@ -87,6 +89,8 @@ class Scene
     public static readonly Admin = 'subject-admin'
     public static readonly Server = Descriptors.Server
     public static readonly Idp = Descriptors.Idp
+    /** The env server joins the realm-capable components with Task 6; the tests take it as capable from 0.1.4. */
+    public static readonly Capable = new RealmCapableComponents(new Map([[Descriptors.Server, '0.1.4'], [Descriptors.Idp, '0.2.8'], [TenantAdminComponent.Name, '0.1.7']]))
 
     public readonly Cluster = new FakeCluster()
     public readonly Home: IRealmSecretStore = Object.assign(new CloudSecretManagerSecretStore(), { Verify: () => Promise.resolve() })
@@ -96,7 +100,7 @@ class Scene
         [Scene.Idp, [Scene.Target('engine', 'pragmatic-system', Scene.Idp, '0.2.8')]],
     ]))
     public readonly Service = new ConfigurationService(new InMemoryConfigurationRepository(), new Descriptors(), this.Targets, this.Applier,
-        new RealmComponentSecretWriter(new RealmSecretWriter(this.Home), new ComponentSecretWriter(new KubeApiClient(this.Cluster)), this.Targets, Scene.Tenant))
+        new RealmComponentSecretWriter(new RealmSecretWriter(this.Home), new ComponentSecretWriter(new KubeApiClient(this.Cluster)), this.Targets, Scene.Tenant, Scene.Capable))
 
     public static Target(name: string, namespace: string, component: string, version: string): ConfigurationTarget
     {
@@ -130,7 +134,7 @@ class Scene
 
     public Migration(self?: IConsoleSelfTarget): InterimSecretMigration
     {
-        return new InterimSecretMigration(this.Service, new KubeApiClient(this.Cluster), this.Home, self)
+        return new InterimSecretMigration(this.Service, new KubeApiClient(this.Cluster), this.Home, self, Scene.Capable)
     }
 
     public DeletedAt(namespace: string, component: string = Scene.Server): number
@@ -157,8 +161,12 @@ describe('secrets in the realm secrets home', () =>
         assert.equal((await scene.Service.PutSecret(Scene.Tenant, Scene.Server, 'dev1', 'Legacy.Token', 'v')).reference, 'secret:file/Legacy.Token')
         scene.Targets.Targets.set(Scene.Server, [Scene.Target('dev1', 'pragmatic-env-dev1', Scene.Server, '0.1.3')])
         assert.equal((await scene.Service.PutSecret(Scene.Tenant, Scene.Server, 'dev1', 'token', 'v')).reference, 'secret:file/token')
-        assert.equal(RealmCapableComponents.Reads(Scene.Server, undefined), false, 'an unknown version is not taken to read it')
-        assert.equal(RealmCapableComponents.Reads('pragmatic-hive-agent', '9.9.9'), false)
+        assert.equal(Scene.Capable.Reads(Scene.Server, undefined), false, 'an unknown version is not taken to read it')
+        assert.equal(Scene.Capable.Reads('pragmatic-hive-agent', '9.9.9'), false)
+        // Until Task 6 renders the home's settings for environment workloads, the console's own table leaves the env server out.
+        assert.equal(RealmCapableComponents.Default.Reads(Scene.Server, '0.1.4'), false)
+        assert.equal(RealmCapableComponents.Default.Reads(Scene.Idp, '0.2.8'), true)
+        assert.equal(RealmCapableComponents.Default.Reads(TenantAdminComponent.Name, '0.1.6'), false)
     })
 
     it('the interim Kubernetes Secret is migrated, the version re-applied and only then deleted', async () =>
@@ -200,16 +208,19 @@ describe('secrets in the realm secrets home', () =>
         assert.equal((await scene.Service.Component(Scene.Tenant, Scene.Server)).versions.length, versions, 'the head was the rewritten version already')
     })
 
-    it('a value the tenant admin entered since is never overwritten by a stale interim value', async () =>
+    it('a value the tenant admin entered since is the realm\'s: never overwritten, the targets re-pointed to it, reported as differing', async () =>
     {
         const scene = new Scene()
         await scene.AppliedWithFileToken()
         scene.Interim('pragmatic-env-dev1', { token: 'stale' })
+        scene.Interim('pragmatic-env-dev2', { token: 'older' })
         await scene.Home.Put('token', 'entered-since')
-        assert.equal(await scene.Outcome(), InterimSecretMigrationOutcome.Conflict)
+        const [report] = (await scene.Migration().Run(Scene.Tenant)).filter(entry => entry.Component === Scene.Server)
+        assert.equal(report!.Outcome, InterimSecretMigrationOutcome.Moved)
+        assert.deepEqual(report!.Differing, ['token'])
         assert.equal(await scene.Home.Get('token'), 'entered-since')
-        assert.equal(scene.Applier.Applied.length, 0)
-        assert.ok(scene.Secret('pragmatic-env-dev1') !== undefined)
+        assert.equal(scene.Applier.Applied.length, 2)
+        assert.equal(scene.Secret('pragmatic-env-dev1'), undefined)
     })
 
     it('one key with different values across targets or components moves nothing of either component', async () =>
@@ -219,7 +230,7 @@ describe('secrets in the realm secrets home', () =>
         await scene.AppliedWithFileToken(Scene.Idp, ['engine'])
         scene.Interim('pragmatic-env-dev1', { token: 'server-value' })
         scene.Interim('pragmatic-system', { token: 'idp-value' }, Scene.Idp)
-        const reports = await scene.Migration().Run(Scene.Tenant)
+        const reports = (await scene.Migration().Run(Scene.Tenant)).filter(report => report.Component !== TenantAdminComponent.Name)
         assert.deepEqual(reports.map(report => report.Outcome), [InterimSecretMigrationOutcome.Conflict, InterimSecretMigrationOutcome.Conflict])
         assert.equal(await scene.Home.Get('token'), null)
         assert.equal(scene.Cluster.Objects.size, 2)
@@ -287,10 +298,61 @@ describe('secrets in the realm secrets home', () =>
         scene.Interim('pragmatic-system', { other: 'w' }, Scene.Idp)
         const self = new SelfTarget(new ApplyTarget('h1', 'pragmatic-system', Scene.Idp))
         self.Proving = true
-        assert.equal(await scene.Outcome(Scene.Idp, self), InterimSecretMigrationOutcome.ApplyFailed)
+        assert.equal(await scene.Outcome(Scene.Idp, self), InterimSecretMigrationOutcome.AwaitingSelfApply)
         assert.equal(scene.Applier.Applied.length, 0)
         self.Proving = false
         assert.equal(await scene.Outcome(Scene.Idp, self), InterimSecretMigrationOutcome.Moved)
+    })
+
+    it('the console\'s own component goes last', async () =>
+    {
+        const scene = new Scene()
+        const reports = await scene.Migration().Run(Scene.Tenant)
+        assert.equal(reports.at(-1)!.Component, TenantAdminComponent.Name)
+        assert.equal(reports[0]!.Component, Scene.Server)
+    })
+
+    it('a draft keeps its edits through a failed and a resumed run, and no duplicate version is saved', async () =>
+    {
+        const scene = new Scene()
+        const applied = await scene.AppliedWithFileToken()
+        await scene.Service.Save(Scene.Tenant, Scene.Server, applied, { options: { core: { pollMs: 9000, token: 'secret:file/token' } } }, Scene.Admin, 'draft')
+        scene.Interim('pragmatic-env-dev1', { token: 'v' })
+        scene.Interim('pragmatic-env-dev2', { token: 'v' })
+        scene.Applier.Reverts.add('pragmatic-env-dev2')
+        await scene.Migration().Run(Scene.Tenant)
+        const afterFirst = (await scene.Service.Component(Scene.Tenant, Scene.Server)).versions.length
+        scene.Applier.Reverts.clear()
+        assert.equal(await scene.Outcome(), InterimSecretMigrationOutcome.Moved)
+        const versions = (await scene.Service.Component(Scene.Tenant, Scene.Server)).versions
+        assert.equal(versions.length, afterFirst, 'the resumed run reused the rewritten version')
+        const head = await scene.Service.Version(Scene.Tenant, Scene.Server, versions.at(-1)!.version)
+        assert.deepEqual(head.document, { options: { core: { pollMs: 9000, token: 'secret:realm/token' } } })
+    })
+
+    it('a key a pinned file reference still reads stays in the Secret', async () =>
+    {
+        const scene = new Scene()
+        const saved = await scene.Service.Save(Scene.Tenant, Scene.Server, 0, { options: { core: { token: 'secret:file/token@2' } } }, Scene.Admin, 'pinned')
+        await scene.Service.Apply(Scene.Tenant, Scene.Server, saved.version, 'dev1', Scene.Admin)
+        scene.Interim('pragmatic-env-dev1', { token: 'v' })
+        await scene.Migration().Run(Scene.Tenant)
+        assert.deepEqual(Object.keys(scene.Secret('pragmatic-env-dev1')!), ['token'])
+    })
+
+    it('a bad-name key with different values does not block the component; a Secret that does not read blocks only its own', async () =>
+    {
+        const scene = new Scene()
+        await scene.AppliedWithFileToken()
+        await scene.AppliedWithFileToken(Scene.Idp, ['engine'])
+        scene.Interim('pragmatic-env-dev1', { 'Legacy.Key': 'a', 'token': 'v' })
+        scene.Interim('pragmatic-env-dev2', { 'Legacy.Key': 'b', 'token': 'v' })
+        scene.Interim('pragmatic-system', { other: 'w' }, Scene.Idp)
+        scene.Cluster.Refusals.set(`GET ${Scene.SecretPath('pragmatic-system', Scene.Idp)}`, 403)
+        const reports = await scene.Migration().Run(Scene.Tenant)
+        assert.equal(reports.find(report => report.Component === Scene.Server)!.Outcome, InterimSecretMigrationOutcome.BadName)
+        assert.equal(reports.find(report => report.Component === Scene.Idp)!.Outcome, InterimSecretMigrationOutcome.ApplyFailed)
+        assert.equal(await scene.Home.Get('other'), null)
     })
 
     it('a draft head keeps its edits, its references rewritten', async () =>
@@ -312,5 +374,12 @@ describe('secrets in the realm secrets home', () =>
         assert.deepEqual(rewritten, { a: 'secret:realm/k', b: ['secret:file/other', 'secret:file/k@2'], c: { d: 'secret:realm/k', e: 3 } })
         assert.equal(InterimSecretMigration.RefersToFile(rewritten, 'k'), true, 'a pinned file reference still reads the Secret')
         assert.equal(InterimSecretMigration.RefersToFile({ a: 'secret:realm/k' }, 'k'), false)
+    })
+
+    it('a start the realm secrets home refused puts nothing back; a configuration that refused does', () =>
+    {
+        assert.equal(ConsoleStartFallback.PutsBack(new ConfigurationStartError(ConfigurationStartReason.SecretsHomeUnavailable, 'x')), false)
+        assert.equal(ConsoleStartFallback.PutsBack(new ConfigurationStartError(ConfigurationStartReason.Invalid, 'x')), true)
+        assert.equal(ConsoleStartFallback.PutsBack(new Error('x')), true)
     })
 })

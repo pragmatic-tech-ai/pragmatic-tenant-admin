@@ -13,22 +13,30 @@ export enum InterimSecretMigrationOutcome
     Moved = 'moved',
     /** Nothing to move (no interim Secret, or an empty one). */
     Nothing = 'nothing',
-    /** A key holds different values (two targets or components, or the realm home already holds another): nothing of this
-     *  component moved. A realm secret has one value; the tenant admin decides which (enter it in the console again). */
+    /** A key the realm home does not hold has different values (two targets or components): nothing of this component
+     *  moved. A realm secret has one value; the tenant admin enters the one it should have in the console, then it moves. */
     Conflict = 'conflict',
     /** Some keys are not realm secret names (one lowercase segment): those stay in the interim Secret, the others moved. */
     BadName = 'bad-name',
-    /** A target's rewritten configuration did not apply (or could not be saved): its Secret stays (its pods still read
-     *  it); the move resumes at the next start. */
+    /** A target's rewritten configuration did not apply (or could not be saved, or its Secret not read): its Secret stays
+     *  (its pods still read it); the move resumes at the next start. */
     ApplyFailed = 'apply-failed',
     /** A target runs a version that cannot read the realm secrets home: it keeps its interim Secret until it is upgraded. */
     AwaitingUpgrade = 'awaiting-upgrade',
+    /** The console's own apply is still being proven: its own target moves at a later start. */
+    AwaitingSelfApply = 'awaiting-self-apply',
 }
 
 /** One component's move, by names only (never a value). */
 export class InterimSecretMigrationReport
 {
-    public constructor(public readonly Component: string, public readonly Outcome: InterimSecretMigrationOutcome, public readonly Keys: readonly string[], public readonly Targets: readonly string[])
+    public constructor(
+        public readonly Component: string,
+        public readonly Outcome: InterimSecretMigrationOutcome,
+        public readonly Keys: readonly string[],
+        public readonly Targets: readonly string[],
+        /** Keys the realm home already held with another value: the home's value is the realm's (the interim one goes). */
+        public readonly Differing: readonly string[] = [])
     {
         Object.freeze(this)
     }
@@ -56,22 +64,33 @@ class InterimSecret
     }
 }
 
+/** One component's interim Secrets, or that they could not be read. */
+class ComponentSecrets
+{
+    public constructor(public readonly Summary: ConfigurationComponentSummaryDto, public readonly Secrets: readonly InterimSecret[], public readonly Unreadable: boolean)
+    {
+    }
+}
+
 /**
  * Moves the C3.1 interim homes of secret values (the Kubernetes Secrets `pragmatic-secrets-<component>` the console wrote
  * per target namespace, store `file`) into the realm's secrets home, at the console's start when the hive has one.
  *
- * A realm secret has one value for the whole realm, so the values are gathered over every component first: a key with
- * two values (two targets, two components, or the realm home already holding another) moves nothing of the components
- * holding it (`conflict`), and the realm home is written only where it holds nothing under that name, so a value a
- * tenant admin entered since is never overwritten. Keys that are no realm secret names stay where they are (`bad-name`).
- * Only targets whose running version reads the realm home are re-pointed (`awaiting-upgrade` otherwise): per target, a
- * version whose `secret:file/<key>` references read `secret:realm/<key>` is saved for the component version the target
- * runs (one such version per source version and component version, reused) and applied, which waits for the roll. A
+ * A realm secret has one value for the whole realm. A value the realm home already holds is the realm's (a tenant admin
+ * entered it since, or an earlier run moved it): it is never overwritten, and the targets are re-pointed to it (the
+ * keys are reported as `Differing` when the interim value was another). A key the home does not hold, with different
+ * values over the components' Secrets, moves nothing of the components holding it (`conflict`) until a tenant admin
+ * enters its value. Keys that are no realm secret names stay where they are (`bad-name`). Only targets whose running
+ * version reads the realm home are re-pointed (`awaiting-upgrade` otherwise): per target, a version whose
+ * `secret:file/<key>` references read `secret:realm/<key>` is saved for the component version the target runs (any
+ * existing version of that document and component version is reused) and applied, which waits for the roll. A
  * target's moved keys leave its Secret only once its apply completed and neither its applied version nor the head still
- * refers to them as files (the Secret goes when it is empty). A failure of one target (an apply in progress, a refused
- * apply, a save that lost a race twice) leaves its Secret and moves on; the next start resumes. The console's own
- * component goes last (its apply restarts this console) and waits while its own apply is still being proven. The head
- * from before the move is saved again rewritten, so a draft keeps its edits. Idempotent.
+ * refers to them as files (the Secret goes when it is empty). A failure of one target or component (a Secret that does
+ * not read, an apply in progress, a refused apply, a save that lost a race twice) leaves its Secret and moves on; the
+ * next start resumes. The console's own component goes last (its apply restarts this console) and waits while its own
+ * apply is still being proven. The head from before the move, when no target runs it (a draft), is saved again
+ * rewritten so it stays the head with its edits, unless a target still awaits an upgrade or its version cannot read the
+ * realm home. Idempotent.
  */
 export class InterimSecretMigration
 {
@@ -80,12 +99,13 @@ export class InterimSecretMigration
     private static readonly Utf8 = 'utf8'
     private static readonly DataKey = 'data'
     private static readonly Comment = 'secret references moved to the realm secrets home'
-    private static readonly VersionKeySeparator = '@'
 
-    // The rewritten versions saved in this run, by source version and component version.
-    private readonly saved = new Map<string, number>()
-
-    public constructor(private readonly service: ConfigurationService, private readonly client: KubeApiClient, private readonly home: IRealmSecretStore, private readonly self?: IConsoleSelfTarget)
+    public constructor(
+        private readonly service: ConfigurationService,
+        private readonly client: KubeApiClient,
+        private readonly home: IRealmSecretStore,
+        private readonly self?: IConsoleSelfTarget,
+        private readonly capable: RealmCapableComponents = RealmCapableComponents.Default)
     {
     }
 
@@ -94,88 +114,127 @@ export class InterimSecretMigration
         const I = InterimSecretMigration
         const summaries = [...await this.service.List(tenantId)]
             .sort((a, b) => Number(a.component === TenantAdminComponent.Name) - Number(b.component === TenantAdminComponent.Name))
-        const found = new Map<string, InterimSecret[]>()
+        const components: ComponentSecrets[] = []
         for (const summary of summaries)
         {
-            const secrets: InterimSecret[] = []
-            for (const target of summary.targets)
-            {
-                const secret = await this.Read(summary.component, target)
-                if (secret !== undefined && secret.Values.size > 0) secrets.push(secret)
-            }
-            found.set(summary.component, secrets)
+            components.push(await this.Gather(summary))
         }
-        const conflicts = await this.Conflicts([...found.values()].flat())
+        const held = await this.Held(components)
+        const conflicts = I.Conflicts(components, held)
         const reports: InterimSecretMigrationReport[] = []
-        for (const summary of summaries)
+        for (const entry of components)
         {
-            const secrets = found.get(summary.component)!
+            const keys = I.KeysOf(entry.Secrets)
+            const targets = entry.Secrets.map(secret => secret.Target.environment)
+            if (entry.Unreadable || held === undefined)
+            {
+                reports.push(new InterimSecretMigrationReport(entry.Summary.component, InterimSecretMigrationOutcome.ApplyFailed, keys, targets))
+                continue
+            }
             try
             {
-                reports.push(await this.Move(tenantId, summary, secrets, conflicts))
+                reports.push(await this.Move(tenantId, entry, held, conflicts))
             }
             catch
             {
                 // Whatever failed for this component (listing its versions, its draft), the others still move.
-                reports.push(new InterimSecretMigrationReport(summary.component, InterimSecretMigrationOutcome.ApplyFailed, I.KeysOf(secrets), secrets.map(s => s.Target.environment)))
+                reports.push(new InterimSecretMigrationReport(entry.Summary.component, InterimSecretMigrationOutcome.ApplyFailed, keys, targets))
             }
         }
         return reports
     }
 
-    // Keys with more than one value over every Secret, or a value the realm home holds differently.
-    private async Conflicts(secrets: readonly InterimSecret[]): Promise<ReadonlySet<string>>
+    // A component's interim Secrets; a Secret that does not read marks the component unreadable (it then moves nothing).
+    private async Gather(summary: ConfigurationComponentSummaryDto): Promise<ComponentSecrets>
+    {
+        const secrets: InterimSecret[] = []
+        try
+        {
+            for (const target of summary.targets)
+            {
+                const secret = await this.Read(summary.component, target)
+                if (secret !== undefined && secret.Values.size > 0) secrets.push(secret)
+            }
+            return new ComponentSecrets(summary, secrets, false)
+        }
+        catch
+        {
+            return new ComponentSecrets(summary, secrets, true)
+        }
+    }
+
+    // What the realm home holds under every movable key; undefined when the home does not answer (nothing moves).
+    private async Held(components: readonly ComponentSecrets[]): Promise<ReadonlyMap<string, string | null> | undefined>
+    {
+        const held = new Map<string, string | null>()
+        try
+        {
+            for (const key of InterimSecretMigration.KeysOf(components.flatMap(entry => entry.Secrets)))
+            {
+                if (RealmSecretName.IsName(key)) held.set(key, await this.home.Get(key))
+            }
+            return held
+        }
+        catch
+        {
+            return undefined
+        }
+    }
+
+    // Movable keys the home does not hold, with more than one value over every component's Secrets.
+    private static Conflicts(components: readonly ComponentSecrets[], held: ReadonlyMap<string, string | null> | undefined): ReadonlySet<string>
     {
         const values = new Map<string, string>()
         const conflicts = new Set<string>()
-        for (const secret of secrets)
+        for (const secret of components.flatMap(entry => entry.Secrets))
         {
             for (const [key, value] of secret.Values)
             {
+                if (!RealmSecretName.IsName(key) || (held?.get(key) ?? null) !== null) continue
                 const seen = values.get(key)
                 if (seen !== undefined && seen !== value) conflicts.add(key)
                 values.set(key, value)
             }
         }
-        for (const [key, value] of values)
-        {
-            if (conflicts.has(key) || !RealmSecretName.IsName(key)) continue
-            const held = await this.home.Get(key)
-            if (held !== null && held !== value) conflicts.add(key)
-        }
         return conflicts
     }
 
-    private async Move(tenantId: string, summary: ConfigurationComponentSummaryDto, secrets: readonly InterimSecret[], conflicts: ReadonlySet<string>): Promise<InterimSecretMigrationReport>
+    private async Move(tenantId: string, entry: ComponentSecrets, held: ReadonlyMap<string, string | null>, conflicts: ReadonlySet<string>): Promise<InterimSecretMigrationReport>
     {
         const I = InterimSecretMigration
+        const summary = entry.Summary
         const component = summary.component
+        const secrets = entry.Secrets
         const keys = I.KeysOf(secrets)
         const targets = secrets.map(secret => secret.Target.environment)
         if (keys.length === 0) return new InterimSecretMigrationReport(component, InterimSecretMigrationOutcome.Nothing, [], [])
         if (keys.some(key => conflicts.has(key))) return new InterimSecretMigrationReport(component, InterimSecretMigrationOutcome.Conflict, keys.filter(key => conflicts.has(key)), targets)
         const movable = keys.filter(key => RealmSecretName.IsName(key))
         const unmovable = keys.filter(key => !RealmSecretName.IsName(key))
+        const differing = new Set<string>()
         for (const secret of secrets)
         {
             for (const [key, value] of secret.Values)
             {
-                if (movable.includes(key) && await this.home.Get(key) === null) await this.home.Put(key, value)
+                if (!movable.includes(key)) continue
+                const current = held.get(key) ?? await this.home.Get(key)
+                if (current === null) await this.home.Put(key, value)
+                else if (current !== value) differing.add(key)
             }
         }
-        const draft = summary.head
         let failed = false
-        let waiting = false
+        let upgrade = false
+        let self = false
         for (const secret of secrets)
         {
-            if (!RealmCapableComponents.Reads(component, secret.Target.componentVersion))
+            if (!this.capable.Reads(component, secret.Target.componentVersion))
             {
-                waiting = true
+                upgrade = true
                 continue
             }
             if (this.self !== undefined && this.self.Is(secret.ApplyTarget) && this.self.Proving)
             {
-                failed = true
+                self = true
                 continue
             }
             try
@@ -188,12 +247,13 @@ export class InterimSecretMigration
                 failed = true
             }
         }
-        // A head no target runs is a draft: it is saved again rewritten. One a target runs was rewritten with it.
-        if (draft !== null && !summary.targets.some(target => target.applied === draft)) await this.RewriteDraft(tenantId, component, draft, movable)
-        const outcome = failed
-            ? InterimSecretMigrationOutcome.ApplyFailed
-            : waiting ? InterimSecretMigrationOutcome.AwaitingUpgrade : unmovable.length > 0 ? InterimSecretMigrationOutcome.BadName : InterimSecretMigrationOutcome.Moved
-        return new InterimSecretMigrationReport(component, outcome, outcome === InterimSecretMigrationOutcome.BadName ? unmovable : keys, targets)
+        const draft = summary.head
+        if (draft !== null && !upgrade && !summary.targets.some(target => target.applied === draft)) await this.RewriteDraft(tenantId, component, draft, movable)
+        const outcome = failed ? InterimSecretMigrationOutcome.ApplyFailed
+            : upgrade ? InterimSecretMigrationOutcome.AwaitingUpgrade
+            : self ? InterimSecretMigrationOutcome.AwaitingSelfApply
+            : unmovable.length > 0 ? InterimSecretMigrationOutcome.BadName : InterimSecretMigrationOutcome.Moved
+        return new InterimSecretMigrationReport(component, outcome, outcome === InterimSecretMigrationOutcome.BadName ? unmovable : keys, targets, [...differing].sort())
     }
 
     // The target runs a configuration whose references read the realm home: true when nothing had to change or the apply
@@ -208,31 +268,33 @@ export class InterimSecretMigration
         if (I.Same(rewritten, version.document)) return true
         // Saved for what the target runs (a release roll may have moved it past the applied version's component version).
         const componentVersion = secret.Target.componentVersion ?? version.componentVersion
-        const number = await this.SaveRewritten(tenantId, component, `${applied}${I.VersionKeySeparator}${componentVersion}`, rewritten, componentVersion)
+        const number = await this.Existing(tenantId, component, rewritten, componentVersion) ?? await this.Save(tenantId, component, rewritten, componentVersion)
         const outcome = await this.service.Apply(tenantId, component, number, secret.Target.environment, TenantAdminComponent.Name)
         return outcome.outcome === ApplyOutcome.Applied
     }
 
-    // One rewritten version per source version and component version: reused in this run, or the head when it already is
-    // that document (a resumed run), else saved (once more when another save landed first).
-    private async SaveRewritten(tenantId: string, component: string, key: string, document: unknown, componentVersion: string): Promise<number>
+    // A saved version of that document for that component version (an earlier target's, or an earlier run's).
+    private async Existing(tenantId: string, component: string, document: unknown, componentVersion: string): Promise<number | undefined>
     {
         const I = InterimSecretMigration
-        const known = this.saved.get(key)
-        if (known !== undefined) return known
+        for (const version of [...(await this.service.Component(tenantId, component)).versions].reverse())
+        {
+            if (version.componentVersion !== componentVersion) continue
+            if (I.Same((await this.service.Version(tenantId, component, version.version)).document, document)) return version.version
+        }
+        return undefined
+    }
+
+    // A new head with `document`; once more when another save landed first.
+    private async Save(tenantId: string, component: string, document: unknown, componentVersion: string): Promise<number>
+    {
+        const I = InterimSecretMigration
         for (let attempt = 0; ; attempt++)
         {
             const head = (await this.service.Component(tenantId, component)).versions.at(-1)
-            if (head !== undefined && head.componentVersion === componentVersion && I.Same((await this.service.Version(tenantId, component, head.version)).document, document))
-            {
-                this.saved.set(key, head.version)
-                return head.version
-            }
             try
             {
-                const saved = await this.service.Save(tenantId, component, head?.version ?? 0, document, TenantAdminComponent.Name, I.Comment, componentVersion)
-                this.saved.set(key, saved.version)
-                return saved.version
+                return (await this.service.Save(tenantId, component, head?.version ?? 0, document, TenantAdminComponent.Name, I.Comment, componentVersion)).version
             }
             catch (error)
             {
@@ -241,7 +303,8 @@ export class InterimSecretMigration
         }
     }
 
-    // The moved keys leave the target's Secret once nothing it runs or the head still reads them as files.
+    // The moved keys leave the target's Secret once nothing it runs or the head still reads them as files; the Secret goes
+    // when a re-read finds it empty (a key written meanwhile stays).
     private async Release(tenantId: string, component: string, secret: InterimSecret, keys: readonly string[]): Promise<void>
     {
         const I = InterimSecretMigration
@@ -254,26 +317,23 @@ export class InterimSecretMigration
         }
         const free = keys.filter(key => secret.Values.has(key) && !documents.some(document => I.RefersToFile(document, key)))
         if (free.length === 0) return
-        if (free.length === secret.Values.size)
-        {
-            await this.client.Delete(secret.Path)
-            return
-        }
         await this.client.Patch(secret.Path, { [I.DataKey]: Object.fromEntries(free.map(key => [key, null])) }, KubeContentType.MergePatch)
+        const left = await this.client.Get(secret.Path) as { data?: Record<string, string> } | undefined
+        if (left !== undefined && Object.keys(left.data ?? {}).length === 0) await this.client.Delete(secret.Path)
     }
 
-    // The head from before the move (a draft no target may run yet) is saved again rewritten, so it stays the head with its
-    // edits; nothing is saved when it is already the newest version in that form.
+    // The draft saved again rewritten (for its own component version, which must read the realm home), unless the head
+    // already is that.
     private async RewriteDraft(tenantId: string, component: string, draft: number, keys: readonly string[]): Promise<void>
     {
         const I = InterimSecretMigration
         const before = await this.service.Version(tenantId, component, draft)
+        if (!this.capable.Reads(component, before.componentVersion)) return
         const rewritten = I.Rewritten(before.document, keys)
-        if (I.Same(rewritten, before.document)) return
         const head = (await this.service.Component(tenantId, component)).versions.at(-1)!
         const current = await this.service.Version(tenantId, component, head.version)
         if (I.Same(rewritten, current.document) && current.componentVersion === before.componentVersion) return
-        await this.SaveRewritten(tenantId, component, `${draft}${I.VersionKeySeparator}${before.componentVersion}`, rewritten, before.componentVersion)
+        await this.Save(tenantId, component, rewritten, before.componentVersion)
     }
 
     private async Read(component: string, target: TargetDto): Promise<InterimSecret | undefined>
