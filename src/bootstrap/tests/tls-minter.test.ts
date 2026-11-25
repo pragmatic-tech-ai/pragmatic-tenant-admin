@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { X509Certificate } from 'node:crypto'
 import { describe, it } from 'node:test'
 import type { AddressInfo } from 'node:net'
@@ -50,6 +51,7 @@ describe('OpenSslTlsMinter', () =>
         const ca = new X509Certificate(first.Ca)
         const renewed = new X509Certificate(leaf.Cert)
         assert.ok(renewed.verify(ca.publicKey), 'the existing CA signed the renewed certificate')
+        assert.ok(renewed.validToDate.getTime() <= ca.validToDate.getTime(), 'the leaf ends no later than its CA')
         assert.notEqual(renewed.serialNumber, new X509Certificate(first.Cert).serialNumber)
         assert.equal(renewed.checkHost('journey.acme.example'), '*.acme.example')
         // The environment's view: it was given the CA at its creation and reaches the sign-in service by name.
@@ -73,6 +75,15 @@ describe('OpenSslTlsMinter', () =>
         {
             await new Promise<void>(resolve => server.close(() => resolve()))
         }
+    })
+
+    it('a certificate under a CA never runs past the CA\'s end', () =>
+    {
+        const ca = readFileSync(new URL('../../intents/tests/fixtures/fixture-ca.crt', import.meta.url))
+        const end = new X509Certificate(ca).validToDate
+        assert.equal(OpenSslTlsMinter.LeafDays(ca, new Date(end.getTime() - 30 * 86_400_000 - 1000)), '30')
+        assert.equal(OpenSslTlsMinter.LeafDays(ca, new Date(end.getTime() - 4000 * 86_400_000)), '3650', 'ten years at most')
+        assert.throws(() => OpenSslTlsMinter.LeafDays(ca, new Date(end.getTime() + 1000)), /the CA has ended/)
     })
 
     it('refuses a host a certificate cannot carry', () =>

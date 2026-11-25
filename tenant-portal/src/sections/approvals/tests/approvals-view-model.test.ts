@@ -172,6 +172,22 @@ describe('ApprovalsViewModel expiry', () =>
         assert.deepEqual(api.Decided, [], 'an expired row asks nothing')
     })
 
+    it('the expiry re-check stops when the page is hidden or disposed, and resumes when shown', async () =>
+    {
+        const api = new FakeTenantApi()
+        api.Intents = [ApprovalSamples.Intent('inaaaaaaaaaaaa', { Kind: 'delete-environment', Environment: 'old' }, IntentProgressDto.AwaitingApproval, '2026-11-25T13:00:00.000Z')]
+        const timer = new ManualExpiryTimer()
+        const page = new ApprovalsViewModel(new TenantTestHost(api).Session, undefined, () => ApprovalSamples.Now, timer)
+        await page.Refresh()
+        assert.notEqual(timer.Tick, undefined)
+        page.OnHidden()
+        assert.equal(timer.Tick, undefined, 'hidden: nothing waits')
+        page.OnShown()
+        assert.notEqual(timer.Tick, undefined, 'shown: waits again')
+        page.Dispose()
+        assert.equal(timer.Tick, undefined, 'disposed: nothing waits')
+    })
+
     it('a failure code reads in plain words', () =>
     {
         const row = new ApprovalRowViewModel(new TenantTestHost(new FakeTenantApi()).Session, { ...ApprovalSamples.Create(), Progress: 'failed', Failure: 'not-ready' }, () => ApprovalSamples.Now, () => undefined)

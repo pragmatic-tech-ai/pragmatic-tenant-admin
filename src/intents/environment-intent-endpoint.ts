@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { ConsoleIntentCall, ConsoleIntentLink, ConsoleIntentRefusal, ProtocolDecodeError } from '@pragmatic-tech-ai/pragmatic-hive-protocol'
+import { ConsoleIntentCall, ConsoleIntentLink, ConsoleIntentRefusal, ProtocolDecodeError, type ConsoleEnvironmentListing } from '@pragmatic-tech-ai/pragmatic-hive-protocol'
 import type { EnvironmentIntentApplier } from './environment-intent-applier.js'
 
 /** Whether a bearer is the hive agent's (AgentCallerCheck). */
@@ -54,6 +54,12 @@ export class CallerReviewBudget
     }
 }
 
+/** The console's environments as the agent reads them (ConsoleEnvironments). */
+export interface IConsoleEnvironmentSource
+{
+    List(): Promise<ConsoleEnvironmentListing>
+}
+
 /** What the endpoint logs: event names and codes only, never a token or a body. */
 export interface IEnvironmentIntentLog
 {
@@ -62,13 +68,15 @@ export interface IEnvironmentIntentLog
 
 /**
  * The console's internal intent endpoint (C3.4), its own cluster-internal listener on port 7211, apart from the public
- * one: `POST /internal/environment-intents` with the hive agent's projected token (AgentCallerCheck; anyone else is 403
+ * one: `GET /internal/environments` answers the console's environments (ConsoleEnvironmentListing); `POST
+ * /internal/environment-intents` with the hive agent's projected token (AgentCallerCheck; anyone else is 403
  * `not-agent`) and a ConsoleIntentCall answers the ConsoleIntentOutcome the applier reached; a body that is not a call
  * of a forwarded kind is 400 `malformed`. Every other path is 404, every other method 405.
  */
 export class EnvironmentIntentEndpoint
 {
     private static readonly Post = 'POST'
+    private static readonly Get = 'GET'
     private static readonly StatusOk = 200
     private static readonly StatusNotFound = 404
     private static readonly StatusMethodNotAllowed = 405
@@ -95,7 +103,12 @@ export class EnvironmentIntentEndpoint
 
     private server: Server | undefined
 
-    public constructor(private readonly applier: EnvironmentIntentApplier, private readonly callers: IAgentCallers, private readonly log: IEnvironmentIntentLog, private readonly budget: CallerReviewBudget = new CallerReviewBudget())
+    public constructor(
+        private readonly applier: EnvironmentIntentApplier,
+        private readonly environments: IConsoleEnvironmentSource,
+        private readonly callers: IAgentCallers,
+        private readonly log: IEnvironmentIntentLog,
+        private readonly budget: CallerReviewBudget = new CallerReviewBudget())
     {
     }
 
@@ -143,13 +156,14 @@ export class EnvironmentIntentEndpoint
         try
         {
             const path = (req.url ?? '').split(E.QuerySeparator)[0]
-            if (path !== ConsoleIntentLink.Path)
+            const method = path === ConsoleIntentLink.Path ? E.Post : path === ConsoleIntentLink.EnvironmentsPath ? E.Get : undefined
+            if (method === undefined)
             {
                 req.resume()
                 E.Write(res, E.StatusNotFound, E.NotFoundBody)
                 return
             }
-            if (req.method !== E.Post)
+            if (req.method !== method)
             {
                 req.resume()
                 E.Write(res, E.StatusMethodNotAllowed, E.MethodBody)
@@ -167,6 +181,12 @@ export class EnvironmentIntentEndpoint
                 req.resume()
                 this.log.Event(E.CallerRefusedEvent)
                 E.Refuse(res, ConsoleIntentRefusal.NotAgent)
+                return
+            }
+            if (method === E.Get)
+            {
+                req.resume()
+                E.Write(res, E.StatusOk, (await this.environments.List()).ToJson())
                 return
             }
             const text = await E.ReadBody(req)

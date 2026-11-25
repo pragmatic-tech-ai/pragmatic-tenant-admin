@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Readable } from 'node:stream'
 import { tmpdir } from 'node:os'
@@ -592,8 +592,18 @@ describe('TenantAdminServer', () =>
         await intents.Listen(0, Names.DefaultBind)
         try
         {
-            const publicReply = await fetch('http://' + Names.DefaultBind + ':' + String(composition.host.Address().port) + ConsoleIntentLink.Path, { method: 'POST', body: '{}' })
-            assert.notEqual(publicReply.status, 200, 'the public listener never applies an intent')
+            // The tenant's own host, so the request passes the host guard and reaches routing.
+            const publicStatus = await new Promise<number>((resolve, reject) =>
+            {
+                const request = httpRequest({ host: Names.DefaultBind, port: composition.host.Address().port, path: ConsoleIntentLink.Path, method: 'POST', headers: { host: Names.TenantId + '.' + Names.Domain, 'content-type': 'application/json' } }, response =>
+                {
+                    response.resume()
+                    resolve(response.statusCode ?? 0)
+                })
+                request.on('error', reject)
+                request.end('{}')
+            })
+            assert.equal(publicStatus, 404, 'the public listener has no intent route')
             assert.equal(composition.host.Routes().Match('POST', ConsoleIntentLink.Path).Route, undefined, 'the public listener has no intent route (an unknown POST is refused before routing)')
             const internalReply = await fetch('http://' + Names.DefaultBind + ':' + String(intents.Address().port) + ConsoleIntentLink.Path, { method: 'POST', body: '{}' })
             assert.equal(internalReply.status, 403, 'the internal listener refuses a caller that is not the agent')
@@ -603,6 +613,18 @@ describe('TenantAdminServer', () =>
             await intents.Close()
             await composition.host.Close()
         }
+    })
+
+    it('when the internal intent listener cannot bind, the public listener is closed again', async () =>
+    {
+        const calls: string[] = []
+        const host = { Listen: async () => { calls.push('listen') }, Close: async () => { calls.push('close') } }
+        const intents = { Listen: async () => { throw new Error('EADDRINUSE') } }
+        await assert.rejects(TenantAdminServer.ListenBoth(host, intents, 7100, Names.DefaultBind), /EADDRINUSE/)
+        assert.deepEqual(calls, ['listen', 'close'])
+        calls.splice(0)
+        await TenantAdminServer.ListenBoth(host, undefined, 7100, Names.DefaultBind)
+        assert.deepEqual(calls, ['listen'], 'a console without the endpoint listens once')
     })
 
     it('Compose loads the stored desktop audit before building the plane', async () =>

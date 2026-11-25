@@ -1,4 +1,4 @@
-import { X509Certificate } from 'node:crypto'
+import { createPrivateKey, createPublicKey, X509Certificate } from 'node:crypto'
 import { KubeResourceCatalog, type KubeApiClient, type KubeTypeRef } from '@pragmatic-tech-ai/pragmatic-kube'
 import { K8sManifestBuilder } from '@pragmatic-tech-ai/pragmatic-tenant-plane'
 import { EngineSecretSet } from '../bootstrap/engine-secret-set.js'
@@ -45,6 +45,8 @@ export class ConsoleCertificateRenewal implements IConsoleCertificateRenewal
     private static readonly ManagedByLabel = 'app.kubernetes.io/managed-by'
     private static readonly PemBlock = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----\s*/g
     private static readonly Eol = '\n'
+    private static readonly Spki = 'spki'
+    private static readonly Der = 'der'
 
     public constructor(
         private readonly client: KubeApiClient,
@@ -81,7 +83,8 @@ export class ConsoleCertificateRenewal implements IConsoleCertificateRenewal
         const bundle = C.Certificates(await this.Read(S.DevCa, S.CaKey))
         const caKey = await this.Read(S.DevCaKey, S.CaKeyKey)
         const current = bundle[0]
-        if (current !== undefined && caKey !== undefined && !this.Due(current))
+        // A key that is not this CA's (a rotation that stopped between writing the new key and the new CA) is never used.
+        if (current !== undefined && caKey !== undefined && !this.Due(current) && ConsoleCertificateRenewal.KeyMatches(current, caKey))
         {
             const leaf = this.minter.MintLeaf(hosts, Buffer.from(current, C.Utf8), caKey)
             await this.Write(S.ConsoleTls, S.TlsType, { [S.TlsCertKey]: leaf.Cert, [S.TlsKeyKey]: leaf.Key })
@@ -102,6 +105,22 @@ export class ConsoleCertificateRenewal implements IConsoleCertificateRenewal
     public static Certificates(bundle: Buffer | undefined): string[]
     {
         return bundle === undefined ? [] : [...bundle.toString(ConsoleCertificateRenewal.Utf8).matchAll(ConsoleCertificateRenewal.PemBlock)].map(match => match[0])
+    }
+
+    /** Whether `keyPem` is the private half of the CA certificate's key. */
+    public static KeyMatches(caPem: string, keyPem: Buffer): boolean
+    {
+        const C = ConsoleCertificateRenewal
+        try
+        {
+            const fromKey = createPublicKey(createPrivateKey(keyPem)).export({ type: C.Spki, format: C.Der })
+            const fromCa = new X509Certificate(caPem).publicKey.export({ type: C.Spki, format: C.Der })
+            return fromKey.equals(fromCa)
+        }
+        catch
+        {
+            return false
+        }
     }
 
     private Due(caPem: string): boolean

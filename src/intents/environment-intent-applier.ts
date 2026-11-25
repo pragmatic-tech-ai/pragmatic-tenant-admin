@@ -44,6 +44,9 @@ export class EnvironmentIntentApplier
     private created: Map<string, string> | undefined
     /** The create each intent id is applying now: a retry while it runs answers with the same outcome. */
     private readonly inFlight = new Map<string, Promise<ConsoleIntentOutcome>>()
+    /** The environments an intent is creating or deleting now (the agent's listing shows them progressing or deleting). */
+    private readonly creating = new Set<string>()
+    private readonly deleting = new Set<string>()
 
     public constructor(private readonly options: EnvironmentIntentApplierOptions)
     {
@@ -69,6 +72,18 @@ export class EnvironmentIntentApplier
         }
     }
 
+    /** Whether an intent is creating `name` now. */
+    public IsCreating(name: string): boolean
+    {
+        return this.creating.has(name)
+    }
+
+    /** Whether an intent is deleting `name` now. */
+    public IsDeleting(name: string): boolean
+    {
+        return this.deleting.has(name)
+    }
+
     /** The template an intent's purpose creates (development: a blank workspace; runtime: with its Postgres). */
     public static TemplateOf(purpose: EnvironmentPurpose): Template
     {
@@ -89,8 +104,8 @@ export class EnvironmentIntentApplier
 
     /**
      * The intent's id is noted before the create, so a console that stops mid-create finds the environment its own on
-     * the agent's retry (and creates it again if nothing was registered); it is removed when the name turned out to be
-     * taken, so a later retry never reports someone else's environment as this intent's.
+     * the agent's retry (and creates it again if nothing was registered); it is removed when the create failed in any
+     * way, so a later retry never reports someone else's environment as this intent's.
      */
     private async CreateOnce(intentId: string, action: CreateEnvironment): Promise<ConsoleIntentOutcome>
     {
@@ -110,18 +125,20 @@ export class EnvironmentIntentApplier
         }
         await this.Note(intentId, action.Environment)
         const template = EnvironmentIntentApplier.TemplateOf(action.Purpose)
+        this.creating.add(action.Environment)
         try
         {
             return EnvironmentIntentApplier.OutcomeOf(await this.options.Service.Create(action.Environment, template, TemplateCatalog.DefaultTypeFor(template), undefined, this.options.HiveId(), this.options.Creator()))
         }
         catch (error)
         {
-            if (error instanceof EnvironmentExistsError)
-            {
-                await this.Forget(intentId)
-                return ConsoleIntentOutcome.FailedWith(IntentFailure.EnvironmentExists)
-            }
-            return ConsoleIntentOutcome.FailedWith(IntentFailure.ApplyFailed)
+            // Any failure forgets the note: a later retry must never claim an environment of that name someone else made.
+            await this.Forget(intentId)
+            return ConsoleIntentOutcome.FailedWith(error instanceof EnvironmentExistsError ? IntentFailure.EnvironmentExists : IntentFailure.ApplyFailed)
+        }
+        finally
+        {
+            this.creating.delete(action.Environment)
         }
     }
 
@@ -141,6 +158,7 @@ export class EnvironmentIntentApplier
         {
             return ConsoleIntentOutcome.Applied
         }
+        this.deleting.add(action.Environment)
         try
         {
             await this.options.Service.Delete(action.Environment)
@@ -149,6 +167,10 @@ export class EnvironmentIntentApplier
         catch
         {
             return ConsoleIntentOutcome.FailedWith(IntentFailure.ApplyFailed)
+        }
+        finally
+        {
+            this.deleting.delete(action.Environment)
         }
     }
 

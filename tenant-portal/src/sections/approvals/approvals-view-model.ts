@@ -7,43 +7,10 @@ import type { TenantSessionService } from '../../shell/tenant-session-service.js
 import { UtcText } from '../../shell/utc-text.js'
 import type { KeptIntentDto } from '../../tenant-types.js'
 import { IntentSentences } from './intent-sentences.js'
+import { DecisionRefusal, IntentFailureDto, IntentProgressDto } from './intent-wire.js'
+import { ShownPage, type IShownPage } from '../../shell/shown-page.js'
 
-// Where an intent stands, as the hive agent reports it (the hive protocol's IntentProgress).
-export enum IntentProgressDto
-{
-    AwaitingApproval = 'awaiting-approval',
-    Applying = 'applying',
-    Applied = 'applied',
-    Rejected = 'rejected',
-    Failed = 'failed',
-    Expired = 'expired',
-}
-
-// Why the hive agent did not take a decision (the hive protocol's IntentDecisionRefusal).
-export enum DecisionRefusal
-{
-    Malformed = 'malformed',
-    NotEnrolled = 'not-enrolled',
-    UnknownIntent = 'unknown-intent',
-    NotAwaiting = 'not-awaiting',
-    Expired = 'expired',
-    DigestMismatch = 'digest-mismatch',
-    Unavailable = 'unavailable',
-}
-
-// Why an intent failed, as the hive reports it (the hive protocol's IntentFailure).
-export enum IntentFailureDto
-{
-    PrecheckRefused = 'precheck-refused',
-    EnvironmentNotFound = 'environment-not-found',
-    EnvironmentExists = 'environment-exists',
-    VersionUnavailable = 'version-unavailable',
-    NotReady = 'not-ready',
-    ConsoleUnavailable = 'console-unavailable',
-    RotationRefused = 'rotation-refused',
-    RecheckFailed = 'recheck-failed',
-    ApplyFailed = 'apply-failed',
-}
+export { DecisionRefusal, IntentFailureDto, IntentProgressDto } from './intent-wire.js'
 
 // Starts and stops the expiry re-check (setTimeout in the browser; a manual one in tests).
 export interface IExpiryTimer
@@ -290,7 +257,7 @@ export class ApprovalRowViewModel extends Observable
 // newest first. In an Enrolled hive each waits here until a tenant admin
 // approves or rejects it; a Delegated hive applies them at once and lists them
 // for the record. A console whose hive is not connected has none (Empty).
-export class ApprovalsViewModel extends TenantPageViewModel
+export class ApprovalsViewModel extends TenantPageViewModel implements IShownPage
 {
     private static readonly RowsProperty = 'Rows'
     private static readonly PendingCountProperty = 'PendingCount'
@@ -307,6 +274,25 @@ export class ApprovalsViewModel extends TenantPageViewModel
         private readonly expiry: IExpiryTimer = new TimeoutExpiryTimer())
     {
         super(session)
+        ShownPage.Register(this)
+    }
+
+    // On screen again: wait for the next expiry.
+    public OnShown(): void
+    {
+        this.ScheduleExpiry()
+    }
+
+    // Off screen (popped, covered, another section): nothing waits for an expiry.
+    public OnHidden(): void
+    {
+        this.expiry.Stop()
+    }
+
+    // The page goes away for good (its section is disposed).
+    public Dispose(): void
+    {
+        this.expiry.Stop()
     }
 
     // Re-checks every row's expiry now (the timer's tick), then waits for the next one to expire.

@@ -11,6 +11,9 @@ class RenewalFixture
 {
     public static readonly CaPem = readFileSync(new URL('./fixtures/fixture-ca.crt', import.meta.url), 'utf8')
     public static readonly CaEnd = new X509Certificate(RenewalFixture.CaPem).validToDate
+    /** The fixture CA's own key, and a key of no CA (test-only material). */
+    public static readonly CaKey = readFileSync(new URL('./fixtures/fixture-ca.key', import.meta.url), 'utf8')
+    public static readonly OtherKey = readFileSync(new URL('./fixtures/fixture-other.key', import.meta.url), 'utf8')
     public static readonly Base = '/api/v1/namespaces/pragmatic-system/secrets/'
 }
 
@@ -84,14 +87,14 @@ describe('ConsoleCertificateRenewal', () =>
     {
         const transport = new SecretsTransport()
         transport.Store(EngineSecretSet.DevCa, EngineSecretSet.CaKey, RenewalFixture.CaPem)
-        transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, 'THE-CA-KEY')
+        transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, RenewalFixture.CaKey)
         const minter = new FakeMinter()
         const copies = new CountingCopies()
         assert.equal(await Renewal(transport, minter, copies).RenewAs(), CertificateRenewalKind.Leaf)
         assert.equal(minter.CaMints, 0, 'no new CA')
         assert.deepEqual(minter.Leaves[0]?.Hosts, ['console.acme.example', 'idp-acme.acme.example', '*.acme.example'])
         assert.equal(minter.Leaves[0]?.Ca.trim(), RenewalFixture.CaPem.trim())
-        assert.equal(minter.Leaves[0]?.Key, 'THE-CA-KEY')
+        assert.equal(minter.Leaves[0]?.Key, RenewalFixture.CaKey)
         assert.deepEqual(transport.Writes.map(write => write.Name), [EngineSecretSet.ConsoleTls], 'only the certificate is written')
         assert.equal(transport.Decoded(EngineSecretSet.ConsoleTls, EngineSecretSet.TlsCertKey), 'LEAF-CERT')
         assert.equal(copies.Refreshed, 1)
@@ -105,7 +108,7 @@ describe('ConsoleCertificateRenewal', () =>
             transport.Store(EngineSecretSet.DevCa, EngineSecretSet.CaKey, RenewalFixture.CaPem)
             if (keyKept)
             {
-                transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, 'THE-CA-KEY')
+                transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, RenewalFixture.CaKey)
             }
             const minter = new FakeMinter()
             assert.equal(await Renewal(transport, minter, new CountingCopies(), now).RenewAs(), CertificateRenewalKind.NewCa)
@@ -115,6 +118,19 @@ describe('ConsoleCertificateRenewal', () =>
             assert.ok(bundle.includes(RenewalFixture.CaPem.trim()), 'the old CA is still trusted')
             assert.equal(transport.Decoded(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey), 'NEW-CA-KEY')
         }
+    })
+
+    it('a kept key that is not the CA\'s (a rotation stopped between its writes) is never used: a new CA, the old one kept', async () =>
+    {
+        const transport = new SecretsTransport()
+        transport.Store(EngineSecretSet.DevCa, EngineSecretSet.CaKey, RenewalFixture.CaPem)
+        transport.Store(EngineSecretSet.DevCaKey, EngineSecretSet.CaKeyKey, RenewalFixture.OtherKey)
+        const minter = new FakeMinter()
+        assert.equal(await Renewal(transport, minter, new CountingCopies()).RenewAs(), CertificateRenewalKind.NewCa)
+        assert.equal(minter.Leaves.length, 0, 'nothing signed with the stray key')
+        assert.ok(transport.Decoded(EngineSecretSet.DevCa, EngineSecretSet.CaKey).includes(RenewalFixture.CaPem.trim()))
+        assert.equal(ConsoleCertificateRenewal.KeyMatches(RenewalFixture.CaPem, Buffer.from(RenewalFixture.CaKey)), true)
+        assert.equal(ConsoleCertificateRenewal.KeyMatches(RenewalFixture.CaPem, Buffer.from('not a key')), false)
     })
 
     it('an old CA past its end is dropped from the bundle', async () =>

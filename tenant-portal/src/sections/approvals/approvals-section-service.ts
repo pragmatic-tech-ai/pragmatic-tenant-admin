@@ -22,6 +22,7 @@ export class ApprovalsSectionService extends TenantSectionService
     private readonly openCommand: RelayCommand
     private pending = 0
     private counted = false
+    private root: ApprovalsViewModel | undefined
 
     public constructor(provider: IServiceProvider)
     {
@@ -71,7 +72,16 @@ export class ApprovalsSectionService extends TenantSectionService
 
     protected override CreateRoot(): TenantPageViewModel
     {
-        return new ApprovalsViewModel(this.Session, count => this.SetPending(count))
+        this.root?.Dispose()
+        this.root = new ApprovalsViewModel(this.Session, count => this.SetPending(count))
+        return this.root
+    }
+
+    public override dispose(): void
+    {
+        this.root?.Dispose()
+        this.root = undefined
+        super.dispose()
     }
 
     private CountOnce(): void

@@ -34,6 +34,7 @@ import { ConsoleCertificateRenewal } from './intents/console-certificate-renewal
 import { EnvironmentIntentApplier } from './intents/environment-intent-applier.js'
 import { EnvironmentIntentEndpoint } from './intents/environment-intent-endpoint.js'
 import { IntentEndpointLog } from './intents/intent-endpoint-log.js'
+import { ConsoleEnvironments } from './intents/console-environment-listing.js'
 
 export type TenantAdminConfig = {
     readonly dataRoot: string
@@ -497,18 +498,7 @@ export class TenantAdminServer
             .catch(err => log(TenantAdminServer.SettleFailed + (err instanceof Error ? err.message : String(err))))
         try
         {
-            await composition.host.Listen(cfg.port, cfg.bind)
-            // The agent's internal intent endpoint, beside the public listener (a connected engine only); a failure to bind
-            // it closes the public one too, so nothing is left listening.
-            try
-            {
-                await composition.intents?.Listen()
-            }
-            catch (err)
-            {
-                await composition.host.Close()
-                throw err
-            }
+            await TenantAdminServer.ListenBoth(composition.host, composition.intents, cfg.port, cfg.bind)
         }
         catch (err)
         {
@@ -590,6 +580,24 @@ export class TenantAdminServer
     }
 
     /**
+     * The public listener, then (a connected engine only) the agent's internal intent endpoint on its own port; when the
+     * internal one cannot bind, the public one is closed again, so nothing is left listening.
+     */
+    public static async ListenBoth(host: { Listen(port: number, bind: string): Promise<void>, Close(): Promise<void> }, intents: { Listen(): Promise<void> } | undefined, port: number, bind: string): Promise<void>
+    {
+        await host.Listen(port, bind)
+        try
+        {
+            await intents?.Listen()
+        }
+        catch (err)
+        {
+            await host.Close()
+            throw err
+        }
+    }
+
+    /**
      * The internal intent endpoint (C3.4) of a connected engine in a pod whose chart names the agent's service account:
      * environment intents applied through this console's own environment service, the ingress certificate renewed when the
      * engine minted it. Undefined for any other console.
@@ -621,7 +629,8 @@ export class TenantAdminServer
             Created: await db.Map<string>(TenantAdminRegistry.IntentEnvironments),
             Certificate: certificate,
         })
-        return new EnvironmentIntentEndpoint(applier, new AgentCallerCheck(new HttpsKubeTransport(account), agent), new IntentEndpointLog(log))
+        const environments = new ConsoleEnvironments(service, applier, () => TenantAdminServer.FirstHiveOf(directory).id, EngineEnv.OptionalOf(env, EngineEnv.EngineVersion))
+        return new EnvironmentIntentEndpoint(applier, environments, new AgentCallerCheck(new HttpsKubeTransport(account), agent), new IntentEndpointLog(log))
     }
 
     private static AdvertOff(log: (line: string) => void, reason: string): undefined

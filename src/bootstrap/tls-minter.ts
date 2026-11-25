@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { X509Certificate } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -78,6 +79,8 @@ export class OpenSslTlsMinter implements ITlsMinter
     private static readonly BadHost = 'not a DNS name a certificate can carry: '
     private static readonly NoHosts = 'a certificate needs at least one host'
     private static readonly PrivateMode = 0o600
+    private static readonly DayMs = 86_400_000
+    private static readonly CaEnded = 'the CA has ended: a certificate under it cannot be minted'
     private static readonly OpensslFailed = 'openssl failed while minting a certificate (is the openssl CLI installed?)'
 
     public constructor(private readonly openssl: string = OpenSslTlsMinter.Openssl)
@@ -96,7 +99,7 @@ export class OpenSslTlsMinter implements ITlsMinter
             const constraints = T.NameConstraintsPrefix + [...permitted.map(h => T.PermittedPrefix + h), ...T.ExcludedIps].join(T.Comma)
             this.Run([T.ReqCmd, T.FlagX509, T.FlagNewkey, T.KeySpec, T.FlagNodes, T.FlagKeyout, p(T.CaKeyFile), T.FlagOut, p(T.CaCertFile), T.FlagDays, T.ValidDays,
                 T.FlagSubj, T.CaSubject, T.FlagAddext, T.CaConstraints, T.FlagAddext, T.CaKeyUsage, T.FlagAddext, constraints])
-            this.SignLeaf(hosts, p)
+            this.SignLeaf(hosts, p, T.ValidDays)
             return { Ca: readFileSync(p(T.CaCertFile)), Cert: readFileSync(p(T.ServerCertFile)), Key: readFileSync(p(T.ServerKeyFile)), CaKey: readFileSync(p(T.CaKeyFile)) }
         }
         finally
@@ -115,7 +118,7 @@ export class OpenSslTlsMinter implements ITlsMinter
             const p = (file: string): string => join(dir, file)
             writeFileSync(p(T.CaCertFile), caCert)
             writeFileSync(p(T.CaKeyFile), caKey, { mode: T.PrivateMode })
-            this.SignLeaf(hosts, p)
+            this.SignLeaf(hosts, p, T.LeafDays(caCert))
             return { Cert: readFileSync(p(T.ServerCertFile)), Key: readFileSync(p(T.ServerKeyFile)) }
         }
         finally
@@ -141,13 +144,28 @@ export class OpenSslTlsMinter implements ITlsMinter
     }
 
     /** The server key, its request and the certificate the CA in the folder signs for `hosts`. */
-    private SignLeaf(hosts: readonly string[], p: (file: string) => string): void
+    /**
+     * How many days a certificate under `caCert` may run: the usual ten years, but never past the CA's own end (a leaf
+     * that outlives its issuer would fail at the CA's end anyway, silently).
+     */
+    public static LeafDays(caCert: Buffer, now: Date = new Date()): string
+    {
+        const T = OpenSslTlsMinter
+        const left = Math.floor((new X509Certificate(caCert).validToDate.getTime() - now.getTime()) / T.DayMs)
+        if (left < 1)
+        {
+            throw new Error(T.CaEnded)
+        }
+        return String(Math.min(Number(T.ValidDays), left))
+    }
+
+    private SignLeaf(hosts: readonly string[], p: (file: string) => string, days: string): void
     {
         const T = OpenSslTlsMinter
         this.Run([T.ReqCmd, T.FlagNewkey, T.KeySpec, T.FlagNodes, T.FlagKeyout, p(T.ServerKeyFile), T.FlagOut, p(T.ServerCsrFile), T.FlagSubj, T.SubjectPrefix + T.CommonNameOf(hosts)])
         writeFileSync(p(T.ExtFile), T.SanPrefix + hosts.map(h => T.DnsPrefix + h).join(T.Comma) + T.Eol + T.ServerExtensions)
         this.Run([T.X509Cmd, T.FlagReq, T.FlagIn, p(T.ServerCsrFile), T.FlagCa, p(T.CaCertFile), T.FlagCaKey, p(T.CaKeyFile), T.FlagCaCreateSerial,
-            T.FlagOut, p(T.ServerCertFile), T.FlagDays, T.ValidDays, T.FlagExtfile, p(T.ExtFile)])
+            T.FlagOut, p(T.ServerCertFile), T.FlagDays, days, T.FlagExtfile, p(T.ExtFile)])
     }
 
     /** The first host that fits the 64-character CN limit and is no wildcard, else the first host's first label. */

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { KubeContentType, KubeMethod, type IKubeTransport, type KubeResponse } from '@pragmatic-tech-ai/pragmatic-kube'
 import {
-    ComponentAtVersion, ConsoleIntentCall, ConsoleIntentLink, ConsoleIntentOutcome, ConsoleIntentRefusal, CreateEnvironment, DeleteEnvironment, EnvironmentPurpose,
+    ComponentAtVersion, ConsoleEnvironmentListing, EnvironmentReadiness, ConsoleIntentCall, ConsoleIntentLink, ConsoleIntentOutcome, ConsoleIntentRefusal, CreateEnvironment, DeleteEnvironment, EnvironmentPurpose,
     IntentFailure, IntentProgress, Repair, RepairScope, Rotate, RotationSubject, UpdateEnvironment,
 } from '@pragmatic-tech-ai/pragmatic-hive-protocol'
 import {
@@ -11,9 +11,10 @@ import {
 import { AgentCallerCheck } from '../agent-caller-check.js'
 import { EnvironmentIntentApplier, type IConsoleCertificateRenewal } from '../environment-intent-applier.js'
 import { CallerReviewBudget, EnvironmentIntentEndpoint, type IAgentCallers } from '../environment-intent-endpoint.js'
+import { ConsoleEnvironments } from '../console-environment-listing.js'
 
 /** The console's environment service, standing in: records the calls. */
-class FakeEnvironments implements Pick<IEnvironmentService, 'Create' | 'Delete' | 'Restart' | 'List'>
+class FakeEnvironments implements Pick<IEnvironmentService, 'Create' | 'Delete' | 'Restart' | 'List' | 'ListReconciled'>
 {
     public readonly Records: EnvironmentRecord[] = []
     public readonly Calls: unknown[][] = []
@@ -47,6 +48,11 @@ class FakeEnvironments implements Pick<IEnvironmentService, 'Create' | 'Delete' 
     }
 
     public List(): readonly EnvironmentRecord[]
+    {
+        return this.Records
+    }
+
+    public async ListReconciled(): Promise<readonly EnvironmentRecord[]>
     {
         return this.Records
     }
@@ -134,7 +140,8 @@ class EndpointWorld
     public async Endpoint(): Promise<{ Endpoint: EnvironmentIntentEndpoint, Url: string, Events: string[] }>
     {
         const events: string[] = []
-        const endpoint = new EnvironmentIntentEndpoint(this.Applier(), new AllowList(), { Event: (event, code) => events.push(event + (code === undefined ? '' : ':' + code)) })
+        const applier = this.Applier()
+        const endpoint = new EnvironmentIntentEndpoint(applier, new ConsoleEnvironments(this.Environments, applier, () => 'acme-hive', EndpointWorld.Version), new AllowList(), { Event: (event, code) => events.push(event + (code === undefined ? '' : ':' + code)) })
         await endpoint.Listen(0, '127.0.0.1')
         return { Endpoint: endpoint, Url: 'http://127.0.0.1:' + endpoint.Address().port + ConsoleIntentLink.Path, Events: events }
     }
@@ -238,6 +245,18 @@ describe('EnvironmentIntentApplier', () =>
         assert.equal((await world.Applier().Apply(create)).Failure, IntentFailure.EnvironmentExists)
         assert.equal(world.Created.Saved.has('inabcdefghijkl'), false, 'the note is removed')
         // Someone else's environment of that name is there now.
+        world.Environments.Fail = undefined
+        world.Environments.Records.push({ name: 'prod', type: EnvType.Runtime, template: Template.RuntimePostgres, environmentId: 'prod', createdAt: '', status: EnvStatus.Running })
+        assert.equal((await world.Applier().Apply(create)).Failure, IntentFailure.EnvironmentExists)
+    })
+
+    it('a create that failed otherwise forgets the note too: a later same-named environment is never claimed', async () =>
+    {
+        const world = new EndpointWorld()
+        const create = ConsoleIntentCall.Create('inabcdefghijkl', new CreateEnvironment('prod', EnvironmentPurpose.Runtime, null))
+        world.Environments.Fail = new Error('quota')
+        assert.equal((await world.Applier().Apply(create)).Failure, IntentFailure.ApplyFailed)
+        assert.equal(world.Created.Saved.has('inabcdefghijkl'), false)
         world.Environments.Fail = undefined
         world.Environments.Records.push({ name: 'prod', type: EnvType.Runtime, template: Template.RuntimePostgres, environmentId: 'prod', createdAt: '', status: EnvStatus.Running })
         assert.equal((await world.Applier().Apply(create)).Failure, IntentFailure.EnvironmentExists)
@@ -347,7 +366,7 @@ describe('CallerReviewBudget', () =>
         assert.equal(budget.Take('10.0.0.5'), true)
         const world = new EndpointWorld()
         let reviews = 0
-        const endpoint = new EnvironmentIntentEndpoint(world.Applier(), { IsAgent: async () => { reviews += 1; return false } }, { Event: () => undefined }, new CallerReviewBudget(1))
+        const endpoint = new EnvironmentIntentEndpoint(world.Applier(), { List: async () => ConsoleEnvironmentListing.Of([]) }, { IsAgent: async () => { reviews += 1; return false } }, { Event: () => undefined }, new CallerReviewBudget(1))
         await endpoint.Listen(0, '127.0.0.1')
         try
         {
@@ -373,5 +392,60 @@ describe('CallerReviewBudget', () =>
         assert.equal(await TenantAdminServer.IntentEndpointOf(env, undefined, undefined, undefined as never, undefined as never, undefined as never, EngineComposition.From(env), undefined as never, line => lines.push(line)), undefined)
         assert.equal(lines.length, 1)
         assert.match(lines[0] ?? '', /PRAGMATIC_ENGINE_AGENT_SERVICE_ACCOUNT is not set/)
+    })
+})
+
+describe('the console\'s environments for its agent', () =>
+{
+    it('only the agent\'s account reads them; each with its readiness and the engine\'s version', async () =>
+    {
+        const world = new EndpointWorld()
+        world.Environments.Records.push(
+            { name: 'prod', type: EnvType.Runtime, template: Template.RuntimePostgres, environmentId: 'prod', hiveId: 'acme-hive', createdAt: '', status: EnvStatus.Running },
+            { name: 'stale', type: EnvType.Development, template: Template.DevBlank, environmentId: 'stale', hiveId: 'acme-hive', createdAt: '', status: EnvStatus.Stopped },
+            { name: 'broken', type: EnvType.Development, template: Template.DevBlank, environmentId: 'broken', hiveId: 'acme-hive', createdAt: '', status: EnvStatus.Failed },
+            { name: 'elsewhere', type: EnvType.Development, template: Template.DevBlank, environmentId: 'elsewhere', hiveId: 'other-hive', createdAt: '', status: EnvStatus.Running },
+        )
+        const { Endpoint, Url } = await world.Endpoint()
+        try
+        {
+            const url = Url.replace(ConsoleIntentLink.Path, ConsoleIntentLink.EnvironmentsPath)
+            const refused = await fetch(url, { headers: { authorization: 'Bearer another-token-0123456789' } })
+            assert.equal(refused.status, 403)
+            assert.deepEqual(await refused.json(), ConsoleIntentLink.RefusalBody(ConsoleIntentRefusal.NotAgent))
+            const reply = await fetch(url, { headers: { authorization: 'Bearer agent-token-0123456789' } })
+            assert.equal(reply.status, 200)
+            const listing = ConsoleEnvironmentListing.Parse(await reply.json())
+            assert.deepEqual(listing.Environments.map(environment => [environment.Name, environment.Readiness, environment.Version]), [
+                ['prod', EnvironmentReadiness.Ready, EndpointWorld.Version],
+                ['stale', EnvironmentReadiness.NotReady, EndpointWorld.Version],
+                ['broken', EnvironmentReadiness.NotReady, EndpointWorld.Version],
+            ], 'another hive\'s environment is not listed')
+            assert.equal((await fetch(url, { method: 'POST', headers: { authorization: 'Bearer agent-token-0123456789' } })).status, 405)
+        }
+        finally
+        {
+            await Endpoint.Close()
+        }
+    })
+
+    it('an environment an intent is creating is progressing, one it is deleting is deleting; a version that is not semantic is none', async () =>
+    {
+        const record = { name: 'prod', type: EnvType.Runtime, template: Template.RuntimePostgres, environmentId: 'prod', createdAt: '', status: EnvStatus.Running }
+        const applier = { IsCreating: (name: string) => name === 'prod', IsDeleting: () => false }
+        assert.equal(new ConsoleEnvironments({ ListReconciled: async () => [record] }, applier, () => 'h', undefined).ReadinessOf(record), EnvironmentReadiness.Progressing)
+        assert.equal(new ConsoleEnvironments({ ListReconciled: async () => [record] }, { IsCreating: () => false, IsDeleting: () => true }, () => 'h', undefined).ReadinessOf(record), EnvironmentReadiness.Deleting)
+        const listing = await new ConsoleEnvironments({ ListReconciled: async () => [record] }, applier, () => 'h', 'latest').List()
+        assert.equal(listing.Environments[0]?.Version, null)
+        const world = new EndpointWorld()
+        let open = (): void => undefined
+        world.Environments.Gate = new Promise<void>(resolve => { open = resolve })
+        const real = world.Applier()
+        const running = real.Apply(ConsoleIntentCall.Create('inabcdefghijkl', new CreateEnvironment('prod', EnvironmentPurpose.Runtime, null)))
+        await new Promise(resolve => setImmediate(resolve))
+        assert.equal(real.IsCreating('prod'), true)
+        open()
+        await running
+        assert.equal(real.IsCreating('prod'), false)
     })
 })
